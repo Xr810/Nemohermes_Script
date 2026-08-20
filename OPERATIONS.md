@@ -1,136 +1,232 @@
-# Open WebUI + Hermes 部署后运维指南（网关优先版）
+# Operations Guide
 
-> 适用：部署完成后，日常需要**改/增 MCP 连接**、**改/增 Provider（模型来源）**。
-> **管理面 = OpenShell 网关**（`openshell` / `nemoclaw` 命令，在 **VM 宿主机**上执行，
-> 即 `orb -m je-accept sh -c '...'`）。沙箱里的 Hermes 只是执行者，
-> 配置源头在网关——不要直接去沙箱里改 Hermes 配置（会被网关配置覆盖/不同步）。
+Day-two operations for a deployment created by [`deploy.sh`](README.md): changing
+the model or provider, managing MCP servers, restarting Open WebUI, and reading
+logs.
 
----
+**The OpenShell gateway is the source of truth.** Hermes inside the sandbox only
+executes what the gateway hands it. Change configuration through
+`openshell` / `nemoclaw` on the host, not by editing files inside the sandbox —
+gateway updates overwrite sandbox-side edits, and edits to Hermes `config.yaml`
+break the integrity anchor (see [Approval mode](#approval-mode)).
 
-## 0. 架构速览（谁管什么）
+## Conventions
 
-```
-浏览器 → Open WebUI(3000) → Hermes 网关(沙箱内 18642) → inference.local(沙箱内)
-                                                              └→ OpenShell 网关推理层
-                                                                   ├ Provider: compatible-endpoint (openai)
-                                                                   └ Model: DeepSeek-V4-Flash
-管理命令位置：
-  Provider/模型  → openshell provider ... / openshell inference ...   （VM 宿主机）
-  MCP(HTTPS)    → nemoclaw <沙箱> mcp ...                            （VM 宿主机）
-  MCP(本地stdio) → hermes mcp ...（沙箱内，网关不支持本地 MCP）
-```
-
-- Open WebUI 里永远只有一个模型 `hermes-agent`。**换模型 = 改网关推理配置**。
-- 已注册 provider：`compatible-endpoint`（openai 类型）。网关内置 provider 档案
-  （profiles）：deepinfra / nvidia / google-vertex-ai / aws-bedrock / claude-code /
-  codex / copilot 等。
-
----
-
-## 1. 改/增 Provider
-
-### 1.0 先看现状（VM 宿主机）
+All commands run **on the deployment host** (the machine where you ran
+`./deploy.sh`), as the deploying user. `<sandbox>` is your `SANDBOX_NAME` from
+`config.env`.
 
 ```bash
-openshell inference get          # 当前推理 provider + 模型
-openshell provider list          # 已注册 provider
-openshell provider list-profiles # 可用的 provider 档案（含各家的 endpoints 数）
+cd ~/deploy && . config.env && echo "$SANDBOX_NAME"
 ```
 
-### 1.1 换模型（同一个 provider 内切换）—— 最常用
+If the host is a VM and you are working from outside it, prefix commands with
+your VM runner — for example `orbctl run -m <vm> …` for OrbStack — or simply SSH
+in first.
 
-```bash
-openshell inference set --provider compatible-endpoint --model <新模型名>
-# 例：openshell inference set --provider compatible-endpoint --model DeepSeek-V3
-# 可选：--timeout <秒>；--no-verify 跳过验证
+## Architecture
+
+```
+browser
+  → 127.0.0.1:3000 on the host          (je-open-webui-forward.service)
+    → Open WebUI in the sandbox          (je-open-webui.service → start.sh)
+      → Hermes API server in the sandbox (host:port from /sandbox/.hermes/.env)
+        → OpenShell gateway inference layer
+          → provider (OpenAI-compatible endpoint) → model
 ```
 
-### 1.2 改 provider 的凭据/配置（换 API Key、换 base_url）
-
-```bash
-openshell provider update compatible-endpoint \
-  --credential <KEY=新值> \
-  --config <KEY=新值>
-# 凭据自动过期：--credential-expires-at KEY=TIMESTAMP
-```
-
-### 1.3 增加新 provider
-
-```bash
-# a) 有现成档案（deepinfra / nvidia / vertex 等）：按档案导入/实例化
-openshell provider profile import <档案文件或目录>   # 自定义档案
-openshell provider list-profiles                     # 看内置档案名
-
-# b) 实例化后填入凭据（凭据先登记为 OpenShell provider credential）
-openshell provider update <新provider名> --credential KEY=VALUE --config KEY=VALUE
-
-# c) 切到新 provider
-openshell inference set --provider <新provider名> --model <模型>
-```
-
-### 1.4 删除 provider
-
-```bash
-openshell provider delete <provider名>
-```
-
-### 1.5 生效方式
-
-- 网关推理层按请求转发，**改完一般立即生效**。发条消息验证即可。
-- 若沙箱侧没变化：重启沙箱或网关服务
-  （`systemctl --user restart nemoclaw-openshell-gateway.service`，在 VM 宿主机）。
-
----
-
-## 2. 改/增 MCP 连接
-
-### 2.1 OpenShell 网关托管 MCP（**公网 HTTPS 地址**，VM 宿主机）
-
-```bash
-# 凭据先登记为 OpenShell provider credential（只存 host 侧，沙箱内只见占位符）
-# 添加：
-nemoclaw je-test-channel mcp add <服务器名> --url https://<公网HTTPS>/mcp --env <KEY>
-# 管理：
-nemoclaw je-test-channel mcp list
-nemoclaw je-test-channel mcp status <服务器名> --probe
-nemoclaw je-test-channel mcp status <服务器名> --tools
-nemoclaw je-test-channel mcp remove <服务器名>
-```
-
-- 安全模型：凭据以 `openshell:resolve:env:KEY` 占位符进沙箱，出网时由 OpenShell 解析
-  并强制 mcp 策略。
-- 部署脚本 04-mcp.sh 注册的 `mcp-router` 就是这个路径（MCP_URL 留空 = 未启用）。
-
-### 2.2 本地/stdio MCP（**不走网关**，沙箱内执行）
-
-```bash
-nemoclaw je-test-channel exec -- hermes mcp add <名称> --command npx --args -y @modelcontextprotocol/server-filesystem /sandbox/data
-nemoclaw je-test-channel exec -- hermes mcp list / test <名称> / remove <名称>
-```
-
-- 网关托管 MCP 只支持 HTTPS `--url`；本地进程型 MCP 用这条。
-- 可加任意多个；加完下一次 agent 请求即生效。
-
----
-
-## 3. 低层备选（不推荐日常使用）
-
-沙箱内直接改 Hermes 配置可绕开网关，但**下次网关 `inference set` 会覆盖**：
-
-```bash
-nemoclaw je-test-channel exec -- hermes config set model.default <模型>
-nemoclaw je-test-channel exec -- hermes config edit
-```
-仅用于临时/调试；正式变更请走第 1 节网关命令。
-
----
-
-## 4. 常见问题速查
-
-| 现象 | 处理 |
+| Concern | Where you change it |
 |---|---|
-| 换了模型没生效 | 确认 `openshell inference get` 已变；发新消息验证；仍不行重启网关服务 |
-| 找不到想要的新 provider | `openshell provider list-profiles` 看档案；没有就 `profile import` 自定义档案 |
-| 想加本地 MCP（npx 等） | 网关不支持，走 2.2 `hermes mcp add --command` |
-| MCP 报凭据解析失败 | `nemoclaw mcp status <名> --probe`；确认 `--env` 的 KEY 已在 OpenShell 登记凭据 |
-| 误改了沙箱内 hermes 配置 | 用 `openshell inference set` 重设一次即可恢复网关一致状态 |
+| Provider and model | `openshell provider …` / `openshell inference …` |
+| MCP over HTTPS | `nemoclaw <sandbox> mcp …` |
+| MCP over local stdio | `hermes mcp …` inside the sandbox (the gateway has no local-process transport) |
+| Approval mode | `./deploy.sh 02` |
+| Open WebUI process | `systemctl --user … je-open-webui` |
+
+Open WebUI shows a single Hermes agent model. Its base URL points at the Hermes
+API server, not at your provider, so **switching models is a gateway change, not
+an Open WebUI setting**.
+
+## Service management
+
+Two user units are created by step 3. They are enabled for `default.target`, so
+they come back after a reboot once the gateway is up.
+
+```bash
+systemctl --user status  je-open-webui.service
+systemctl --user restart je-open-webui.service
+systemctl --user restart je-open-webui-forward.service   # only the local port forward
+journalctl --user -u je-open-webui -n 50 --no-pager
+```
+
+`je-open-webui.service` runs `start.sh` inside the sandbox and depends on
+`nemoclaw-openshell-gateway.service`. Stop and `ExecStartPre` both run
+`~/.local/libexec/je-open-webui-cleanup`, which kills any leftover Open WebUI
+process in the sandbox so a restart cannot end up with two servers on the same
+port.
+
+If the page will not load, check the forward unit first — the app is usually
+running and only the tunnel died.
+
+## Provider and model
+
+Inspect the current state before changing anything:
+
+```bash
+openshell inference get           # active provider + model
+openshell provider list           # registered providers
+openshell provider list-profiles  # built-in provider profiles
+```
+
+Switch model within the same provider (the common case):
+
+```bash
+openshell inference set --provider <provider> --model <model>
+# optional: --timeout <seconds>, --no-verify to skip validation
+```
+
+Rotate a key or change the endpoint:
+
+```bash
+openshell provider update <provider> \
+  --credential <KEY>=<new-value> \
+  --config <KEY>=<new-value>
+# expiring credentials: --credential-expires-at <KEY>=<timestamp>
+```
+
+Add a provider:
+
+```bash
+openshell provider list-profiles                # pick a built-in profile
+openshell provider profile import <file-or-dir> # or import a custom profile
+openshell provider update <provider> --credential KEY=VALUE --config KEY=VALUE
+openshell inference set --provider <provider> --model <model>
+```
+
+Remove one with `openshell provider delete <provider>`.
+
+Changes take effect on the next request, so send a message to confirm. If the
+sandbox still behaves as before, restart the gateway:
+
+```bash
+systemctl --user restart nemoclaw-openshell-gateway.service
+```
+
+## MCP servers
+
+### Gateway-managed (HTTPS)
+
+This is the path `04-mcp.sh` uses. The URL must be public HTTPS.
+
+```bash
+nemoclaw <sandbox> mcp add <name> --url https://<host>/mcp --env <KEY>
+nemoclaw <sandbox> mcp list
+nemoclaw <sandbox> mcp status <name> --probe   # credential resolution
+nemoclaw <sandbox> mcp status <name> --tools   # tool discovery
+nemoclaw <sandbox> mcp remove <name>
+```
+
+`--env <KEY>` names a credential registered with OpenShell; it is not the token
+itself. The sandbox only ever sees an `openshell:resolve:env:<KEY>` placeholder,
+which the gateway resolves on egress while enforcing the MCP policy. The
+deployment registers this server as `mcp-router`.
+
+To add the router after the fact, set `MCP_URL` in `config.env`, export the
+token, and re-run the step:
+
+```bash
+export MCP_ROUTER_TOKEN='...'
+./deploy.sh 04
+```
+
+### Local stdio
+
+Local process MCP servers bypass the gateway and are configured inside the
+sandbox:
+
+```bash
+nemoclaw <sandbox> exec -- hermes mcp add <name> \
+  --command npx --args -y @modelcontextprotocol/server-filesystem /sandbox/data
+nemoclaw <sandbox> exec -- hermes mcp list
+nemoclaw <sandbox> exec -- hermes mcp test <name>
+nemoclaw <sandbox> exec -- hermes mcp remove <name>
+```
+
+`hermes mcp` maintains its own state alongside the config anchor, so these
+commands are safe — unlike hand-editing `config.yaml`. New servers apply from the
+next agent request.
+
+## Approval mode
+
+Use the deployment step rather than changing it by hand:
+
+```bash
+# edit APPROVALS_MODE in config.env to off | smart | manual
+./deploy.sh 02
+```
+
+NemoClaw pins the SHA-256 of `/sandbox/.hermes/config.yaml` in
+`/sandbox/.hermes/.config-hash`. Writing the config without updating that anchor
+makes the container fail with `HERMES_MCP_CONFIG_DRIFT` and restart in a loop.
+Step 2 does the whole sequence: back up config and anchor, set the mode, rewrite
+the anchor, restart, verify, and roll back if the container comes up unhealthy.
+
+Check the current value at any time:
+
+```bash
+nemoclaw <sandbox> exec -- hermes config get approvals.mode
+```
+
+## Reinstalling the Open WebUI filter
+
+The `hermes_source_files` filter passes chat uploads to Hermes as whole files
+instead of chunking them for retrieval. Step 3 imports it automatically once the
+admin account exists; if that timed out, run it manually:
+
+```bash
+nemoclaw <sandbox> exec -- /sandbox/open-webui/.venv/bin/python \
+  /sandbox/open-webui/install-hermes-source-filter.py \
+  --source /sandbox/open-webui/functions/hermes_source_files.py
+```
+
+It must run under the Open WebUI virtualenv: the installer imports `jwt`, which
+is a project dependency and is absent from the sandbox system Python.
+
+## Diagnostics
+
+```bash
+./deploy.sh 05                                  # full verification, read-only
+openshell -g nemoclaw sandbox list              # sandbox state
+nemoclaw doctor                                 # gateway health
+nemoclaw <sandbox> logs --tail 50               # sandbox / Hermes logs
+journalctl --user -u je-open-webui -n 50        # Open WebUI logs
+docker ps -a --filter 'label=openshell.ai/sandbox-name=<sandbox>'
+```
+
+A container in `restarting` state almost always means config drift.
+
+## Troubleshooting
+
+| Symptom | Action |
+|---|---|
+| Model change had no effect | Confirm with `openshell inference get`, send a new message, then restart the gateway service |
+| Wanted provider not listed | `openshell provider list-profiles`; import a custom profile if it is not built in |
+| Need a local (npx) MCP server | The gateway only supports HTTPS; use `hermes mcp add --command` |
+| MCP credential resolution fails | `nemoclaw <sandbox> mcp status <name> --probe`; verify the `--env` key is registered as an OpenShell credential |
+| Sandbox container restarts in a loop | Config drift. Re-run `./deploy.sh 02`, and check `nemoclaw <sandbox> logs --tail 50` |
+| Edited Hermes config by hand | Re-run `./deploy.sh 02` (or `openshell inference set`) to restore a consistent, anchored state |
+| Open WebUI unreachable, service active | Restart `je-open-webui-forward.service`; from a remote machine use an SSH tunnel |
+| Uploads come back chunked | The filter is missing or disabled; reinstall it and confirm it is active and global |
+
+## Escape hatch
+
+Editing Hermes configuration inside the sandbox works but is overwritten by the
+next gateway `inference set`, and requires an anchor resync afterwards:
+
+```bash
+nemoclaw <sandbox> exec -- hermes config set model.default <model>
+nemoclaw <sandbox> exec -- hermes config edit
+```
+
+Use this for temporary debugging only. For anything you want to keep, go through
+the gateway commands above.

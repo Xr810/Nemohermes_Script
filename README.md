@@ -1,173 +1,225 @@
-# NemoHermes 一键部署指南
+# NemoHermes Deploy
 
-## 一、部署前准备
+Scripted deployment of a Hermes agent sandbox (NVIDIA OpenShell + NemoClaw) with
+Open WebUI as the chat front end, on a single Ubuntu host.
 
-| 要求 | 说明 |
-|---|:--|
-| 系统 | Ubuntu 24.04 |
-| 网络 | 能访问 `nvidia.com`、GitHub/GHCR、PyPI，以及API Endpoint |
-| 推理 | OpenAI 兼容地址 + API key + 模型名 |
-| 权限 | sudo |
-| MCP (Optional) | 公网 HTTPS 的 MCP Router 地址 + MCP verify token |
+The entry point is `./deploy.sh`. It runs an interactive wizard, then five
+numbered steps: install infrastructure, set the approval mode, install Open
+WebUI, register MCP (optional), and verify the result.
 
----
+## Requirements
 
-## 二、把本文件夹拷到目标 Linux
+| Item | Requirement |
+|---|---|
+| OS | Ubuntu 24.04 |
+| Privileges | `sudo` (used to install prerequisite packages) |
+| Commands | `bash`, `ssh`, `curl`, `git` (the rest is installed automatically) |
+| Network | `nvidia.com`, GitHub/GHCR, PyPI, and your inference endpoint |
+| Inference | OpenAI-compatible base URL + model name + API key |
+| MCP (optional) | Public HTTPS MCP Router URL + token |
 
-请在Windows上执行：
+The inference endpoint must resolve over real DNS. A local proxy in fake-ip mode
+(Surge/Clash, `198.18.x.x`) makes the onboard probe fail; the scripts detect this
+and stop with an explanation.
+
+## Quick start
+
+Copy the folder to the target Linux host and run it there:
 
 ```bash
-scp -r deploy/ 用户名@服务器:~/
-```
-
-随后在Linux上执行：
-
-```bash
-ssh 用户名@服务器
+scp -r deploy/ user@server:~/
+ssh user@server
 cd ~/deploy
-```
-
----
-
-## 三、第一次运行
-
-```bash
 ./deploy.sh
 ```
 
-中途若提示 sudo 密码，输入即可。
+On a fresh machine the first run stops once and asks you to reboot (see
+[Reboot](#reboot-first-run-only)). After rebooting, run `./deploy.sh` again.
 
-向导会依次提问：
+When everything succeeds the last step prints `0 failed` and the Open WebUI URL.
 
-| # | 问题 | 怎么填 |
+## Configuration wizard
+
+Every prompt shows the current value; press Enter to keep it. Required items
+never fall back to a silent default.
+
+| # | Prompt | Notes |
 |---|---|---|
-| 1 | Inference base URL | OpenAI 兼容地址，如 `https://openrouter.ai/api/v1`。必填 |
-| 2 | Default model name | 模型名，如 `deepseek/deepseek-v4-flash-0731`。必填 |
-| 3 | Inference API key | API key (输入可见，只显示开头几位) |
-| 4 | MCP Router URL | 公网 HTTPS (如 `https://intern.eastasia.cloudapp.azure.com/mcp`), Optional |
-| 5 | MCP Router token | **仅当填了第 4 题才出现。** MCP verify token |
-| 6 | Approval mode | `off`（免审批）/ `smart` / `manual`（默认） |
-| 7 | Sandbox name | 小写字母、数字、连字符，如 `main` |
+| 1 | Inference base URL | Required. OpenAI-compatible, e.g. `https://openrouter.ai/api/v1` |
+| 2 | Default model name | Required, e.g. `DeepSeek-V4-Flash` |
+| 3 | Inference API key | Visible input; only the prefix is echoed back |
+| 4 | MCP Router URL | Optional. Leave blank to skip MCP entirely |
+| 5 | MCP Router token | Only asked when 4 is set. Raw token, no `Bearer ` prefix |
+| 6 | Approval mode | `off` (no prompts) / `smart` / `manual` (default) |
+| 7 | Sandbox name | Required. Lowercase letters, digits, hyphens |
 
-示例：
+Answers for 1, 2, 4, 6, 7 are written back to `config.env`. **The API key and the
+MCP token are never written to disk** — they live in memory for that run only, so
+every run asks for them again. To avoid re-pasting:
 
-```
-━━━ Deployment Config (Enter = keep current value) ━━━
-1) Inference base URL ...
-   > https://openrouter.ai/api/v1
-2) Default model name ...
-   > deepseek/deepseek-v4-flash-0731
-3) Inference API key ...
-   > sk-xxxxxxxxxxxx
-4) MCP Router URL ...
-   >                    （回车 = 跳过 MCP）
-6) Approval mode ...
-   > off
-7) Sandbox name ...
-   > main
+```bash
+export INFERENCE_API_KEY='sk-...'
+export MCP_ROUTER_TOKEN='...'
+./deploy.sh              # press Enter at the key/token prompts
 ```
 
-答完后脚本会：装依赖 → 跑 NVIDIA 官方安装器（Docker + OpenShell + NemoClaw）→ 尝试 onboard。
+Do not point the base URL at `https://inference.local/v1`. That name only exists
+inside the sandbox and the onboard probe will fail.
 
----
+## What the steps do
 
-## 四、重启
+| Step | Script | Actions |
+|---|---|---|
+| 1 | `01-infra.sh` | Preflight (DNS, docker group, inference config); `apt-get install git curl binutils zstd lsof`; run the NVIDIA installer when components are missing; `nemoclaw onboard` until the sandbox is Ready |
+| 2 | `02-hermes.sh` | Set `approvals.mode`, sync the Hermes config-hash anchor, restart the container to confirm no drift (rolls back on failure) |
+| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5); install a blank database; write systemd units; start Open WebUI and the port-forward; wait for the admin account, then import the filter |
+| 4 | `04-mcp.sh` | `nemoclaw <sandbox> mcp add mcp-router`, then probe credentials and tool discovery. Skipped when the MCP URL is empty |
+| 5 | `05-verify.sh` | Read-only checks; exits non-zero if anything failed |
 
-官方安装器会把你加入 docker 组, 脚本会在这里停住并提示重启以刷新权限，例如：
+Steps 1 and 3 are the slow ones. On a constrained network the Open WebUI install
+can take up to an hour with no output — that is the download, not a hang.
+
+## Reboot (first run only)
+
+The NVIDIA installer adds your user to the `docker` group, but the already
+running user systemd manager never picks up new groups, so the managed gateway
+cannot reach `/var/run/docker.sock`. The script detects this and stops:
 
 ```text
-[ERR ] User systemd manager ... lacks the docker group ...
+[ERR ] User systemd manager (pid ...) lacks the docker group (gid ...)
   Fix: reboot the machine once ... then rerun ./deploy.sh
 ```
 
-**请重启这台 Linux**（物理机或虚机都可以）。不要跳过。
+Reboot the host, then run `./deploy.sh` again. The second run skips the
+installer and continues at onboard.
 
-- 普通服务器：`sudo reboot`，再 SSH 回去
-- OrbStack：在 Mac 上执行 `orbctl restart -m <虚机名>`，再 `orbctl run -m <虚机名>`
-- Hyper-V：在管理器里重启那台 Ubuntu
+| Environment | How to reboot |
+|---|---|
+| Plain server | `sudo reboot`, then SSH back in |
+| OrbStack | `orbctl restart -m <vm>`, then `orbctl run -m <vm>` |
+| Hyper-V | Restart the Ubuntu VM from the manager |
 
-重启后：
+This step does not appear if Docker was already installed and your user already
+had working Docker access.
 
-```bash
-cd ~/deploy
-./deploy.sh
-```
+## Create the Open WebUI admin
 
-第二次会**跳过已经装好的官方安装器**，从 onboard 继续。向导里地址/模型/沙箱名直接回车即可。**API key 要再贴一次**（安全原因未保存）；若启用了 MCP，token 也要再贴一次。
-
-> 如果运行此脚本之前这台 Linux 就已经装好 Docker，且用户有Docker权限,此步骤不会出现.
-
----
-
-## 五、等待安装完成
-
-第二次运行会继续：
-
-1. 创建 Hermes 沙箱（onboard）
-2. 按向导设置审批模式（此处脚本会同步Hermes的配置至Openshell gateway,防止重启后Sandbox进入死循环）
-3. 在沙箱内安装 Open WebUI 0.9.5 (体积较大,等待时间较长)
-4. 脚本放入一份空白数据库（防止沿用之前安装失败时产生的旧库）
-
----
-
-## 六、浏览器创建管理员
-
-脚本提示类似：
+Step 3 installs a blank database, so the first visit shows the "create admin"
+screen. The script prints the URL and polls for the account:
 
 ```text
-Please open the browser at: http://127.0.0.1:3000
+[INFO]  Open in your browser: http://127.0.0.1:3000
 ```
 
-打开后创建管理员（邮箱 + 密码）。脚本检测到账号后会自动导入附件 filter。
-
-| 你的浏览器在哪 | 怎么打开 |
+| Where your browser runs | How to reach it |
 |---|---|
-| 就在这台 Linux 上（有桌面） | 直接打开脚本打印的地址 |
-| OrbStack 虚机，浏览器在 Mac 上 | 一般可用脚本打印的本机地址（OrbStack 会做端口映射） |
-| 远程服务器 / Hyper-V，浏览器在 Windows 上 | 笔记本上的 `localhost` **不是**服务器。请用 SSH 隧道：`ssh -L 127.0.0.1:3000:127.0.0.1:3000 用户@服务器`，再打开 `http://127.0.0.1:3000` |
+| On the Linux host (desktop) | Open the printed URL directly |
+| OrbStack VM, browser on macOS | The printed address usually works (OrbStack maps the port) |
+| Remote server, browser elsewhere | `localhost` is your laptop, not the server. Use a tunnel: `ssh -L 127.0.0.1:3000:127.0.0.1:3000 user@server` |
 
-若 10 分钟内没建好管理员，脚本会提示稍后手动导入 filter，照提示执行即可。
+Once the admin exists, the script imports the `hermes_source_files` filter and
+enables it globally. The filter hands direct chat uploads to Hermes as whole
+files instead of chunking them into RAG. If no admin appears within
+`ADMIN_WAIT_SECS` (default 600), the deployment continues and prints the manual
+import command.
 
-Note: 此Filter的作用是上传文件直接传递给Hermes, 而非切块后传递
+## Verification
 
----
+Step 5 checks, without changing anything:
 
-## 七、验证
+- sandbox is Ready, `nemoclaw doctor` reports ok, Hermes reports a version
+- `approvals.mode` matches the configured value (skipped if unset)
+- Open WebUI serves static assets over the forwarded port (HTTP 200)
+- an admin exists and the filter is active and global
+- the three Open WebUI patches are present (new-chat `chat_id`, embedding bypass, uvicorn keep-alive)
+- MCP tool discovery, when an MCP URL is configured
 
-最后会自动检查。看到 `0 failed` 即成功。之后：
+Re-run it any time with `./deploy.sh 05`.
 
-- 聊天：浏览器打开 Open WebUI（访问方式同上）
-- 换模型、加 MCP：见 `OPERATIONS.md`
+## Command-line options
 
----
+```bash
+./deploy.sh                  # full pipeline
+./deploy.sh --skip-approvals # leave the approval mode unchanged
+./deploy.sh --skip-mcp       # skip MCP registration
+./deploy.sh --skip-config    # no wizard; use the current config.env
+./deploy.sh 03               # run only step 3
+./deploy.sh 03 04            # run only steps 3 and 4
+./deploy.sh --help
+```
 
-## 八、常见问题
+Any step can be re-run on its own after fixing a problem; there is no need to
+reinstall from scratch.
 
-| 现象 | 处理 |
+> **Re-running step 3 reinstalls the blank database.** The existing Open WebUI
+> admin account, users, and chat history are discarded and you must create the
+> admin again. This is deliberate, so a failed install never leaves a stale
+> database behind.
+
+## Configuration reference
+
+`config.env` holds everything except secrets.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SANDBOX_NAME` | — | Sandbox created by onboard; required |
+| `AGENT` | `hermes` | Agent runtime; keep as is |
+| `INFERENCE_BASE_URL` | — | OpenAI-compatible endpoint; required |
+| `INFERENCE_MODEL` | — | Default model; required |
+| `INFERENCE_API_KEY` | from env | Never written to the file |
+| `APPROVALS_MODE` | `manual` | `off` / `smart` / `manual`; empty skips step 2 |
+| `MCP_URL` | empty | Public HTTPS MCP Router; empty skips step 4 |
+| `MCP_ENV_VAR` | `MCP_ROUTER_TOKEN` | Name of the credential variable, not the token |
+| `WEBUI_PORT` | `3000` | Open WebUI port inside the sandbox. `resources/start.sh` hardcodes 3000, so change both or neither |
+| `WEBUI_LOCAL_PORT` | `3000` | Host port for the forward; empty disables it |
+| `SANDBOX_WAIT_SECS` | `120` | How long to wait for the sandbox to be Ready |
+| `ADMIN_WAIT_SECS` | `600` | How long to wait for the browser admin |
+| `FORWARD_PORTS` | `8642 …` | Reserved; not used by the current steps |
+| `DOCKERFILE` | `resources/Dockerfile` | Reserved; the image comes from the installer |
+
+Environment variables the scripts honour:
+
+| Variable | Effect |
 |---|---|
-| 提示 sudo 密码 | 正常，输入部署账号密码 |
-| `User systemd manager lacks the docker group` | **正常。** 按第四节重启后再跑 `./deploy.sh` |
-| `git: command not found` | `sudo apt-get install -y git` 后重跑 |
-| `docker daemon not usable` | 若已重启仍如此：`newgrp docker` 后重跑 |
-| `Missing: openshell/nemoclaw` | `source ~/.bashrc` 或 `export PATH="$HOME/.local/bin:$PATH"` 后重跑 |
-| Open WebUI 安装很久没输出 | 多半在下载，请等；连接内网时下载时长可高达一小时 |
-| 想跳过某步 | `./deploy.sh --skip-approvals` 或 `--skip-mcp` |
-| 只重做某一步 | `./deploy.sh 03`（Open WebUI）、`./deploy.sh 04`（MCP）等 |
+| `INFERENCE_API_KEY` | Pre-fills wizard item 3 |
+| `MCP_ROUTER_TOKEN` | Pre-fills wizard item 5 |
+| `REMOTE_HOST` | Run every command over SSH against that host instead of locally |
+| `UNIT_DIR` | Override the systemd user unit directory |
+| `LIBEXEC_DIR` | Override the helper script directory |
 
----
+Running the scripts directly on the target host (`REMOTE_HOST` unset) is the
+supported path; remote mode exists for deploying from a second machine.
 
-## 附：脚本分工（可选阅读）
+## Troubleshooting
 
-| 文件 | 作用 |
+| Symptom | Action |
 |---|---|
-| `deploy.sh` | 入口：向导 + 按顺序调用下面各步 |
-| `01-infra.sh` | 依赖、官方安装器、onboard；docker 组预检 |
-| `02-hermes.sh` | 审批模式 + 配置锁 |
-| `03-openwebui.sh` | Open WebUI + filter |
-| `04-mcp.sh` | `nemoclaw mcp add`（可选） |
-| `05-verify.sh` | 验证 |
-| `lib.sh` | 共用函数 |
-| `config.env` | 本机配置（不含密钥） |
-| `resources/` | 干净数据库、filter、Dockerfile 等 |
+| Prompted for a sudo password | Expected; step 1 installs packages |
+| `User systemd manager ... lacks the docker group` | Expected on a fresh host. Reboot, then re-run `./deploy.sh` |
+| `resolves to fake-ip 198.18.x.x` | A local proxy is hijacking DNS. Disconnect it or exempt the domain |
+| `does not resolve` | Wrong endpoint hostname, or no network access to it |
+| `Missing required inference config` | URL, model, and API key must all be set |
+| `git: command not found` | `sudo apt-get install -y git`, then re-run |
+| `docker daemon not usable` | Still failing after a reboot: `newgrp docker`, then re-run |
+| `Still missing after install` | `source ~/.bashrc` or `export PATH="$HOME/.local/bin:$PATH"`, then re-run |
+| Open WebUI install produces no output | It is downloading; expect up to an hour on a slow link |
+| Container stuck restarting after step 2 | Config drift. Step 2 rolls back automatically; check `nemoclaw <sandbox> logs --tail 50` |
+| Open WebUI will not start | `journalctl --user -u je-open-webui -n 40` |
+| Verification reports failures | Fix the step it points at and re-run that step, then `./deploy.sh 05` |
 
-某步失败时，修好后可只重跑那一步（例如 `./deploy.sh 03`），不必从头装官方安装器。
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `deploy.sh` | Entry point: wizard plus step dispatch |
+| `01-infra.sh` | Prerequisites, NVIDIA installer, onboard, preflight checks |
+| `02-hermes.sh` | Approval mode plus config-hash anchor sync |
+| `03-openwebui.sh` | Open WebUI install, systemd units, filter import |
+| `04-mcp.sh` | Optional `nemoclaw mcp add` registration |
+| `05-verify.sh` | End-to-end verification |
+| `lib.sh` | Shared logging, wizard, sandbox helpers |
+| `config.env` | Host configuration; no secrets |
+| `resources/` | Blank database, Open WebUI install/start scripts, filter, network policy, sandbox Dockerfile |
+
+Day-two operations — changing the model or provider, adding MCP servers,
+restarting services — are documented in [OPERATIONS.md](OPERATIONS.md).

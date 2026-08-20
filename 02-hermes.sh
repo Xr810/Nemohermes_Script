@@ -3,7 +3,7 @@
 # 02-hermes: approvals.mode setup + config hash anchor sync
 # Usage: ./02-hermes.sh
 # Note: editing Hermes config.yaml directly triggers HERMES_MCP_CONFIG_DRIFT,
-#       this script syncs the .config-hash anchor after editing and restarts to verify (see OPERATIONS_LESSONS.md L2)
+#       this script syncs the .config-hash anchor after editing and restarts to verify (see OPERATIONS.md)
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -88,7 +88,7 @@ fi
 echo
 echo "━━━ Verification result: ${PASS} passed, ${FAIL} failed ━━━"
 if [ "$FAIL" -gt 0 ]; then
-  log_err "Failures found. See README.md (常见问题); logs: nemoclaw ${SANDBOX_NAME} logs --tail 50; journalctl --user -u je-open-webui -n 40"
+  log_err "Failures found. See README.md (Troubleshooting); logs: nemoclaw ${SANDBOX_NAME} logs --tail 50; journalctl --user -u je-open-webui -n 40"
   exit 1
 else
   log_ok "All passed! Deployment complete."
