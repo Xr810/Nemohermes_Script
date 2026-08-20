@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-# 03-hermes: approvals.mode setup + config hash anchor sync
-# Usage: ./03-hermes.sh
+# 02-hermes: approvals.mode setup + config hash anchor sync
+# Usage: ./02-hermes.sh
 # Note: editing Hermes config.yaml directly triggers HERMES_MCP_CONFIG_DRIFT,
 #       this script syncs the .config-hash anchor after editing and restarts to verify (see OPERATIONS_LESSONS.md L2)
 # ============================================================
@@ -29,7 +29,7 @@ log_step "Step 2/5: Hermes approvals.mode=${APPROVALS_MODE}"
 CID="$(sandbox_container_id)"
 [ -n "$CID" ] || die "Cannot find sandbox container (openshell-${SANDBOX_NAME})"
 
-# Backup (in-container + local)
+# Copy both config.yaml and its .config-hash lock to host /tmp (needed together for rollback)
 remote "docker cp ${CID}:/sandbox/.hermes/config.yaml /tmp/hm-config.bak && docker cp ${CID}:/sandbox/.hermes/.config-hash /tmp/hm-hash.bak" \
   || log_warn "Backup failed (continuing)"
 
@@ -62,4 +62,4 @@ fi
 
 FINAL="$(sandbox_exec 'hermes config get approvals.mode' 2>/dev/null | tail -1 | tr -d "'\" ")"
 log_ok "approvals.mode = ${FINAL} (still effective after restart)"
-log_ok "Step 2 done. Next: ./04-openwebui.sh"
+log_ok "Step 2 done. Next: ./03-openwebui.sh"

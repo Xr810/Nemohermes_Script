@@ -21,14 +21,10 @@ uv pip install --python "$OPEN_WEBUI_VENV/bin/python" \
   'pypdfium2==5.12.1'
 
 # ---------------------------------------------------------------------------
-# Patch Open WebUI 0.9.5 bug: socket.get_event_emitter crashes with
-# "'NoneType' object has no attribute 'startswith'" for the FIRST message of a
-# NEW chat. The frontend's request_info carries chat_id=None (the KEY exists
-# with value None), so `request_info.get('chat_id', '')` returns None instead
-# of the default '', and `.startswith('channel:')` throws. Result: every new
-# chat message returns 400 and the user sees "no reply". The same bug pattern
-# exists on the second occurrence ('local:' check). Fix both with (or '').
-# See OPERATIONS_LESSONS.md L5. Idempotent: re-running is a no-op.
+# Patch Open WebUI 0.9.5: the first message of a NEW chat sends chat_id=None
+# (the key exists with value None), so .get('chat_id', '') returns None and
+# .startswith() throws — every new chat answers 400 and looks like "no reply".
+# Both occurrences need (or ''). Idempotent.
 "$OPEN_WEBUI_VENV/bin/python" - <<'PYEOF'
 from pathlib import Path
 
@@ -56,16 +52,10 @@ else:
 PYEOF
 
 # ---------------------------------------------------------------------------
-# Patch Open WebUI 0.9.5: uvicorn keep-alive timeout 5s -> 300s.
-# The Open WebUI frontend polls every ~30s, but uvicorn's default keep-alive
-# timeout is 5s, so the server closes every pooled connection between polls.
-# Through the gRPC port-forward bridge (openshell forward service) that close
-# is NOT propagated to the Mac side: the browser's socket stays half-open,
-# the next request on it hangs forever, the browser opens a NEW connection,
-# and dead sockets accumulate until the whole UI freezes (login/send/upload/
-# refresh all dead). Fix: keep the server-side connection alive for 300s so
-# pooled connections survive between polls and are reused cleanly.
-# See OPERATIONS_LESSONS.md L10. Idempotent.
+# Patch Open WebUI 0.9.5: uvicorn keep-alive 5s -> 300s. The frontend polls
+# every ~30s, and the port-forward bridge never propagates uvicorn's close, so
+# pooled browser sockets pile up half-open until the whole UI freezes.
+# Idempotent.
 "$OPEN_WEBUI_VENV/bin/python" - <<'PYEOF'
 from pathlib import Path
 

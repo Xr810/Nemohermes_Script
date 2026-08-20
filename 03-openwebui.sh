@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
-# 04-openwebui: Open WebUI deployment (clean DB + filter source + systemd)
-# Usage: ./04-openwebui.sh
-# Note: uses a clean DB (deliverables/open-webui/open-webui-fresh.db),
+# 03-openwebui: Open WebUI deployment (clean DB + filter source + systemd)
+# Usage: ./03-openwebui.sh
+# Note: uses a clean DB (resources/open-webui-fresh.db),
 #       first visit shows the "create admin" screen. After the admin is created,
-#       this script polls for it and auto-imports the filter (Step 6.5).
+#       this script polls for it and auto-imports the filter (Step 3.5).
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,9 +24,7 @@ log_step "Step 3/5: Open WebUI deployment"
 wait_sandbox_ready || exit 1
 
 # ---- 1. Upload Open WebUI files to the sandbox ----
-# All resources are uploaded from the host (deploy machine) into the sandbox
-# via `nemoclaw upload`. The sandbox cannot see host files, so cp inside the
-# sandbox would fail — everything must be uploaded first.
+# Sandbox cannot see host files; upload with nemoclaw first.
 log_info "Uploading Open WebUI files to the sandbox..."
 OPENWEBUI_DIR="/sandbox/open-webui"
 
@@ -37,13 +35,10 @@ for f in "$OPENWEBUI_START_SH" "$OPENWEBUI_INSTALL_SH" "$OPENWEBUI_PDF_TOOL" \
 done
 
 # ---- 2. Install (venv + dependencies) ----
-# install.sh needs network egress: uv downloads Python from GitHub (astral-sh),
-# pip installs open-webui/pypdfium2 from PyPI. The built-in github preset only
-# whitelists the git binary, so uv needs a custom preset (resources/openwebui-install-policy.yaml)
-# plus the built-in pypi preset.
-# Add the uv/GitHub policy with auto-fix for endpoint ambiguity:
-# applied presets (e.g. brew, tls=skip) may already cover one of our hosts
-# with different tls metadata; patch that host to tls: skip and retry once.
+# install.sh needs GitHub (uv/Python) and PyPI. Built-in github preset only
+# allows git, so add resources/openwebui-install-policy.yaml plus pypi.
+# If policy add hits endpoint ambiguity (tls mismatch with brew etc.),
+# patch that host to tls: skip and retry once.
 apply_openwebui_policy() {
   local out host
   if remote "nemoclaw ${SANDBOX_NAME} policy add --from-file ${POLICY_FILE} --yes" >/dev/null 2>&1; then
@@ -217,7 +212,7 @@ done
 FILTER_INSTALL_CMD="${OPENWEBUI_DIR}/.venv/bin/python ${OPENWEBUI_DIR}/install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py"
 if [ "$waited" -ge "${ADMIN_WAIT_SECS}" ]; then
   log_warn "Timed out waiting, no admin detected. You can run the filter install manually later:"
-  log_warn "  After ./05-mcp.sh, run: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
+  log_warn "  After ./04-mcp.sh, run: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
 else
   log_info "Importing filter (hermes_source_files v1.3.3)..."
   # Must run under the Open WebUI venv python: the installer imports `jwt`,
@@ -228,4 +223,4 @@ else
     || log_warn "filter import failed, rerun the above command manually later"
 fi
 
-log_ok "Step 3 done. Next: ./05-mcp.sh"
+log_ok "Step 3 done. Next: ./04-mcp.sh"

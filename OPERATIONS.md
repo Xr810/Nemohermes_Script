@@ -99,7 +99,7 @@ nemoclaw je-test-channel mcp remove <服务器名>
 
 - 安全模型：凭据以 `openshell:resolve:env:KEY` 占位符进沙箱，出网时由 OpenShell 解析
   并强制 mcp 策略。
-- 部署脚本 05-mcp.sh 注册的 `mcp-router` 就是这个路径（MCP_URL 留空 = 未启用）。
+- 部署脚本 04-mcp.sh 注册的 `mcp-router` 就是这个路径（MCP_URL 留空 = 未启用）。
 
 ### 2.2 本地/stdio MCP（**不走网关**，沙箱内执行）
 

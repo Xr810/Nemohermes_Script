@@ -152,7 +152,7 @@ Note: 此Filter的作用是上传文件直接传递给Hermes, 而非切块后传
 | `Missing: openshell/nemoclaw` | `source ~/.bashrc` 或 `export PATH="$HOME/.local/bin:$PATH"` 后重跑 |
 | Open WebUI 安装很久没输出 | 多半在下载，请等；连接内网时下载时长可高达一小时 |
 | 想跳过某步 | `./deploy.sh --skip-approvals` 或 `--skip-mcp` |
-| 只重做某一步 | `./deploy.sh 04`（Open WebUI）、`./deploy.sh 05`（MCP）等 |
+| 只重做某一步 | `./deploy.sh 03`（Open WebUI）、`./deploy.sh 04`（MCP）等 |
 
 ---
 
@@ -162,12 +162,12 @@ Note: 此Filter的作用是上传文件直接传递给Hermes, 而非切块后传
 |---|---|
 | `deploy.sh` | 入口：向导 + 按顺序调用下面各步 |
 | `01-infra.sh` | 依赖、官方安装器、onboard；docker 组预检 |
-| `03-hermes.sh` | 审批模式 + 配置锁 |
-| `04-openwebui.sh` | Open WebUI + filter |
-| `05-mcp.sh` | `nemoclaw mcp add`（可选） |
-| `06-verify.sh` | 验证 |
+| `02-hermes.sh` | 审批模式 + 配置锁 |
+| `03-openwebui.sh` | Open WebUI + filter |
+| `04-mcp.sh` | `nemoclaw mcp add`（可选） |
+| `05-verify.sh` | 验证 |
 | `lib.sh` | 共用函数 |
 | `config.env` | 本机配置（不含密钥） |
 | `resources/` | 干净数据库、filter、Dockerfile 等 |
 
-某步失败时，修好后可只重跑那一步（例如 `./deploy.sh 04`），不必从头装官方安装器。
+某步失败时，修好后可只重跑那一步（例如 `./deploy.sh 03`），不必从头装官方安装器。

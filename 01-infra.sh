@@ -3,8 +3,7 @@
 # 01-infra: Docker + OpenShell/NemoClaw binaries + Gateway
 # Usage: ./01-infra.sh
 # Notes: auto-runs the NVIDIA official installer to fill in missing components
-#        (curl https://www.nvidia.com/nemoclaw.sh | bash),
-#        never stops to ask the user to install manually.
+#        (curl https://www.nvidia.com/nemoclaw.sh | bash)
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,16 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_config
 
-# ---- Preflight: inference endpoint DNS (fail fast before onboard [3/8]) ----
-# onboard probes INFERENCE_BASE_URL with an SSRF guard. If the host resolves to a
-# Surge/NordVPN fake-ip (198.18/15) or does not resolve at all, the probe fails
-# with a cryptic "SSRF preflight: no HTTP response". Surface the real cause here.
-# Applies to every endpoint host (fake-ip hijacks any domain, not just *.local).
+# ---- Preflight: inference DNS ----
+# Fail fast if the endpoint is fake-ip or unresolvable.
+# Onboard's SSRF probe would only say "no HTTP response".
 check_inference_dns() {
   local host ip
   host="$(printf '%s' "${INFERENCE_BASE_URL}" | sed -E 's#^[a-z][a-z0-9+.-]*://([^/:]+).*#\1#')"
   [ -n "${host}" ] || return 0
-  # IP 字面量端点（如局域网 192.168.x.x / 10.x）不需要 DNS，且 NemoClaw 信任 RFC1918，跳过
+  # Literal IP (e.g. 192.168.x / 10.x): skip DNS; NemoClaw trusts RFC1918.
   case "${host}" in
     [0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;;
   esac
@@ -43,12 +40,9 @@ check_inference_dns() {
   log_info "Inference host ${host} resolves to ${ip}"
 }
 
-# ---- Preflight: user systemd manager must have the docker group ----
-# The docker group is usually added by the installer AFTER the user systemd
-# manager already started; the manager never refreshes supplementary groups,
-# so systemd-run services (the managed OpenShell gateway) cannot connect to
-# /var/run/docker.sock and onboard preflight fails with the cryptic
-# "gateway.version.compatible / gateway.port.uncontested". Fail fast instead.
+# ---- Preflight: user systemd must have the docker group ----
+# Installer adds docker group after this manager started; it never picks up
+# new groups. Gateway then cannot reach docker.sock. Fail fast (reboot to fix).
 check_user_manager_docker_group() {
   local dgid mgr
   dgid="$(getent group docker 2>/dev/null | cut -d: -f3)"
@@ -64,10 +58,9 @@ check_user_manager_docker_group() {
   fi
 }
 
-# ---- Preflight: URL/model/key must all be set before any onboard path ----
-# Both the official installer (auto-onboards) and the direct onboard are
-# non-interactive; an empty API key fails with a cryptic
-# "Provider credential is required" inside the installer. Fail fast instead.
+# ---- Preflight: URL, model, and API key ----
+# Onboard never asks again. An empty key fails later with
+# "Provider credential is required", so check here.
 require_inference_config() {
   if [ -z "${INFERENCE_BASE_URL:-}" ] || [ -z "${INFERENCE_MODEL:-}" ] || [ -z "${INFERENCE_API_KEY:-}" ]; then
     die "Missing required inference config: URL/model/key must all be set.
@@ -97,12 +90,9 @@ if [ "$need_install" = "1" ]; then
     || die "Failed to install prerequisites (git curl binutils zstd lsof)"
 fi
 
-# ---- Auto-install (run official installer if anything is missing) ----
-# The official installer (curl | bash) does THREE things in one pass:
-#   [1/3] Node.js   [2/3] NemoClaw CLI + OpenShell binaries   [3/3] onboard (create gateway + sandbox)
-# It auto-onboards with the agent from NEMOCLAW_AGENT and reads inference config
-# from NEMOCLAW_PROVIDER / NEMOCLAW_ENDPOINT_URL / NEMOCLAW_MODEL / COMPATIBLE_API_KEY.
-# So there is NO separate onboard step — this script IS the full install + onboard.
+# ---- Auto-install if docker / openshell / nemoclaw are missing ----
+# Official installer does three things: Node.js, CLI/binaries, then onboard
+# (gateway + sandbox). Inference settings come from the env vars below.
 if [ "$need_install" = "1" ]; then
   log_info "Missing components detected, running NVIDIA official installer (agent=${AGENT})..."
   log_info "  Inference: ${INFERENCE_BASE_URL}  model=${INFERENCE_MODEL}"
@@ -161,11 +151,9 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
-# ---- Ensure the sandbox exists: run onboard if it is not Ready ----
-# Binaries may already be installed (so the installer was skipped), yet the
-# sandbox may be missing because an earlier onboard was interrupted (e.g. the
-# gateway step failed before lsof was installed). Run onboard directly whenever
-# the sandbox is not Ready.
+# ---- Onboard if the sandbox is not Ready ----
+# Commands may already be installed (installer skipped) while the sandbox
+# is still missing, e.g. a previous onboard failed halfway.
 if ! remote "openshell -g nemoclaw sandbox list 2>/dev/null" | grep -q "${SANDBOX_NAME}.*Ready"; then
   log_info "Sandbox '${SANDBOX_NAME}' not Ready — running onboard (agent=${AGENT})..."
   check_user_manager_docker_group
@@ -188,4 +176,4 @@ wait_sandbox_ready || {
 }
 log_ok "Sandbox '${SANDBOX_NAME}' Ready"
 
-log_ok "Step 1 done (binaries + Docker + sandbox onboarded). Next: ./03-hermes.sh"
+log_ok "Step 1 done (binaries + Docker + sandbox onboarded). Next: ./02-hermes.sh"

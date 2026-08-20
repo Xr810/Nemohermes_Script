@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-# 06-verify: end-to-end verification
-# Usage: ./06-verify.sh
+# 05-verify: end-to-end verification
+# Usage: ./05-verify.sh
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,7 +88,7 @@ fi
 echo
 echo "━━━ Verification result: ${PASS} passed, ${FAIL} failed ━━━"
 if [ "$FAIL" -gt 0 ]; then
-  log_err "Failures found, check REPRODUCE_CURRENT_STATE.md for troubleshooting"
+  log_err "Failures found. See README.md (常见问题); logs: nemoclaw ${SANDBOX_NAME} logs --tail 50; journalctl --user -u je-open-webui -n 40"
   exit 1
 else
   log_ok "All passed! Deployment complete."

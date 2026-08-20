@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# NemoHermes Linux one-click deployment main entry
+# NemoHermes Linux deployment main entry
 #
 # Usage:
 #   ./deploy.sh                # full pipeline
@@ -8,11 +8,6 @@
 #   ./deploy.sh --skip-mcp         # skip MCP config
 #   ./deploy.sh --skip-config      # skip wizard, use current config.env
 #   ./deploy.sh 01 02 ...          # run only the given steps
-#
-# Interactive prompts (security-sensitive, manual input):
-#   ① onboard inference API key (if INFERENCE_API_KEY unset)
-#   ② Open WebUI initial admin creation (browser)
-#   ③ MCP Router token (if MCP is configured)
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,11 +23,11 @@ for arg in "$@"; do
     --skip-approvals) SKIP_APPROVALS=1 ;;
     --skip-mcp)       SKIP_MCP=1 ;;
     --skip-config)    SKIP_CONFIG=1 ;;
-    0[1-6])           SELECTED+=("$arg") ;;
+    0[1-5])           SELECTED+=("$arg") ;;
     -h|--help)
-      sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
-    *) die "Unknown argument: $arg (supported: --skip-approvals / --skip-mcp / --skip-config / 01..06)" ;;
+    *) die "Unknown argument: $arg (supported: --skip-approvals / --skip-mcp / --skip-config / 01..05)" ;;
   esac
 done
 
@@ -61,8 +56,8 @@ log_info "Sandbox: ${SANDBOX_NAME} | Inference: ${INFERENCE_MODEL} @ ${INFERENCE
 
 run_step() {
   local script="$1" name="$2"
-  # SELECTED holds step numbers like "04"; match against the numeric prefix
-  # of the script name ("04-openwebui" -> "04").
+  # SELECTED holds step numbers like "03"; match against the numeric prefix
+  # of the script name ("03-openwebui" -> "03").
   if [ "${#SELECTED[@]}" -gt 0 ]; then
     ! printf '%s\n' "${SELECTED[@]}" | grep -qx "${script%%-*}" && return 0
   fi
@@ -72,13 +67,13 @@ run_step() {
 
 run_step 01-infra      "Step 1: Infrastructure (installs binaries + onboards sandbox)"
 if [ "$SKIP_APPROVALS" = "0" ]; then
-  run_step 03-hermes   "Step 2: Approvals mode"
+  run_step 02-hermes   "Step 2: Approvals mode"
 fi
-run_step 04-openwebui  "Step 3: Open WebUI"
+run_step 03-openwebui  "Step 3: Open WebUI"
 if [ "$SKIP_MCP" = "0" ]; then
-  run_step 05-mcp      "Step 4: MCP Router"
+  run_step 04-mcp      "Step 4: MCP Router"
 fi
-run_step 06-verify     "Step 5: End-to-end verification"
+run_step 05-verify     "Step 5: End-to-end verification"
 
 log_step "Deployment finished"
 log_info "Open WebUI: http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"

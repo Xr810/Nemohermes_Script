@@ -17,17 +17,14 @@ log_warn()  { echo -e "${C_YELLOW}[WARN]${C_RESET}  $*"; }
 log_err()   { echo -e "${C_RED}[ERR ]${C_RESET}  $*" >&2; }
 log_step()  { echo; echo -e "${C_BOLD}${C_CYAN}━━━ $* ━━━${C_RESET}"; }
 
-# Exit on failure
 die() { log_err "$*"; exit 1; }
 
 # ─── Interactive config wizard ───
-# Enter keeps the current config.env value (repeatable runs, easy endpoint swap);
-# required items never silently default. Values are written back to config.env.
+# Enter keeps the current config.env value; required items never silently default.
 prompt_config() {
   local env_file
   env_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.env"
 
-  # 当前 config.env 的值（Enter = 保留现有值）
   local cur_url cur_model cur_mcp cur_approvals cur_sandbox
   cur_url="$(grep -E '^INFERENCE_BASE_URL=' "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
   cur_model="$(grep -E '^INFERENCE_MODEL=' "$env_file" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
@@ -39,7 +36,7 @@ prompt_config() {
   echo -e "${C_BOLD}${C_CYAN}━━━ Deployment Config (Enter = keep current value) ━━━${C_RESET}"
   echo -e "${C_YELLOW}Each item shows the current value; press Enter to keep it, type to override.${C_RESET}"
 
-  # 1. Inference endpoint (required; no silent default — endpoints differ per environment)
+  # 1. Inference endpoint (required)
   echo -e "${C_YELLOW}1) Inference base URL (OpenAI-compatible, e.g. https://xxx.example.com/v1)${C_RESET}"
   echo -e "   current: ${cur_url:-<none>}"
   while :; do
@@ -53,7 +50,7 @@ prompt_config() {
     *) log_warn "URL does not start with http(s); onboard will likely fail, please double-check" ;;
   esac
 
-  # 2. Model name (required — no silent default)
+  # 2. Model name (required)
   echo -e "${C_YELLOW}2) Default model name (required, e.g. DeepSeek-V4-Flash / Pro / V3.2)${C_RESET}"
   echo -e "   current: ${cur_model:-<none>}"
   while :; do
@@ -63,7 +60,7 @@ prompt_config() {
     log_warn "Model name is required (onboard configures it). Type the model id of your endpoint"
   done
 
-  # 3. API key (visible input so paste is confirmable; confirmation shows prefix only)
+  # 3. API key (visible input; only the prefix is echoed back)
   echo -e "${C_YELLOW}3) Inference API key (visible input; Enter = keep env INFERENCE_API_KEY)${C_RESET}"
   if [ -n "${INFERENCE_API_KEY:-}" ]; then
     echo -e "   current: (from env INFERENCE_API_KEY, prefix $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)...) — Enter keeps it"
@@ -85,9 +82,8 @@ prompt_config() {
   read -r -p "   > " MCP_URL
   [ -n "$MCP_URL" ] || MCP_URL="${cur_mcp:-}"
 
-  # 4b. MCP token — only when a URL is set. Never written to config.env.
-  # NemoClaw mcp add stores it in the OpenShell provider store and injects
-  # it at the egress boundary; the sandbox only sees a placeholder.
+  # 4b. MCP token — only when a URL is set. Never written to config.env;
+  # `nemoclaw mcp add` keeps it host-side and the sandbox sees a placeholder.
   if [ -n "${MCP_URL:-}" ]; then
     echo -e "${C_YELLOW}5) MCP Router token (visible input; raw token only, no 'Bearer ' prefix)${C_RESET}"
     if [ -n "${MCP_ROUTER_TOKEN:-}" ]; then
@@ -119,7 +115,7 @@ prompt_config() {
     *) log_warn "Invalid value, using manual"; APPROVALS_MODE="manual" ;;
   esac
 
-  # 7. Sandbox name (required — you pick the name every deployment)
+  # 7. Sandbox name (required)
   echo -e "${C_YELLOW}7) Sandbox name (required; lowercase letters/digits/hyphens, e.g. main / dev / je-accept)${C_RESET}"
   echo -e "   current: ${cur_sandbox:-<none>}"
   while :; do
@@ -132,7 +128,7 @@ prompt_config() {
     *[!a-z0-9-]*|"") log_warn "Sandbox name should be lowercase letters/digits/hyphens only: '${SANDBOX_NAME}'" ;;
   esac
 
-  # Persist to config.env (pipe delimiter to survive / in URLs)
+  # Persist to config.env (| delimiter survives the / in URLs)
   if [ -f "$env_file" ]; then
     sed -i.bak \
       -e "s|^INFERENCE_BASE_URL=.*|INFERENCE_BASE_URL=\"${INFERENCE_BASE_URL}\"|" \
@@ -142,7 +138,6 @@ prompt_config() {
       -e "s|^SANDBOX_NAME=.*|SANDBOX_NAME=\"${SANDBOX_NAME}\"|" \
       "$env_file"
     rm -f "$env_file.bak"
-    # API key and MCP token are NOT written to file; kept only for this run
     log_ok "Config saved to config.env (API key and MCP token kept in-memory only)"
   fi
 
@@ -154,18 +149,15 @@ prompt_config() {
     log_info "MCP=skip"
   fi
 
-  # Export so child scripts inherit these values. MCP_ROUTER_TOKEN is the
-  # name NemoClaw resolves at the OpenShell egress boundary (--env).
+  # Export so child scripts inherit these values
   export INFERENCE_BASE_URL INFERENCE_MODEL INFERENCE_API_KEY MCP_URL MCP_ROUTER_TOKEN APPROVALS_MODE SANDBOX_NAME
 }
 
-# Assert command exists
 require_cmd() {
   local cmd="$1"
   command -v "$cmd" >/dev/null 2>&1 || die "Missing command: $cmd (install it first)"
 }
 
-# Load config.env
 load_config() {
   local dir
   dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -173,22 +165,18 @@ load_config() {
   source "${dir}/config.env"
 }
 
-# Run a command on the target machine
-# Empty REMOTE_HOST = run locally on this machine (script copied here)
-# Set REMOTE_HOST = run over ssh (remote deploy)
+# Empty REMOTE_HOST = run locally; set = run over ssh (remote deploy)
 remote() {
   if [ -n "${REMOTE_HOST:-}" ]; then
     ssh -o ConnectTimeout=15 "$REMOTE_HOST" "$@"
   else
-    # Local mode: parse the whole command line like a remote shell
+    # eval parses the whole command line the way a remote shell would
     eval "$*"
   fi
 }
 
-# Execute inside the sandbox
 sandbox_exec() { remote "nemoclaw ${SANDBOX_NAME} exec -- $*"; }
 
-# Wait for sandbox Ready
 wait_sandbox_ready() {
   local secs="${SANDBOX_WAIT_SECS:-120}" waited=0
   log_info "Waiting for sandbox '${SANDBOX_NAME}' Ready (max ${secs}s)..."
@@ -204,23 +192,19 @@ wait_sandbox_ready() {
   return 1
 }
 
-# Check if the container is Restarting (drift signal)
+# Restarting status = config drift signal
 sandbox_restarting() {
   remote "docker ps -a --filter 'label=openshell.ai/sandbox-name=${SANDBOX_NAME}' --format '{{.Status}}' 2>/dev/null" | grep -q restarting
 }
 
 # ---- Hermes config hash anchor sync ----
-# Rationale (see OPERATIONS_LESSONS.md L2):
-# NemoClaw locks config.yaml/.env sha256 via /sandbox/.hermes/.config-hash.
-# After editing config.yaml you MUST update the anchor, else restart triggers HERMES_MCP_CONFIG_DRIFT.
-#
-# Usage: sync_config_hash <container-id>
-# Steps: read current config.yaml sha256, replace the config line (keep .env + MCP state lines)
+# NemoClaw locks the config.yaml sha256 in /sandbox/.hermes/.config-hash. After
+# editing config.yaml the anchor MUST be updated, or restart triggers
+# HERMES_MCP_CONFIG_DRIFT. Usage: sync_config_hash <container-id>
 sync_config_hash() {
   local cid="$1"
   [ -n "$cid" ] || die "sync_config_hash: missing container ID"
 
-  # Read current config.yaml and anchor
   remote "docker cp ${cid}:/sandbox/.hermes/config.yaml /tmp/hm-config.yaml 2>/dev/null" \
     || die "cannot read container config.yaml"
   remote "docker cp ${cid}:/sandbox/.hermes/.config-hash /tmp/hm-config-hash 2>/dev/null" \
@@ -230,7 +214,7 @@ sync_config_hash() {
   new_hash="$(remote "sha256sum /tmp/hm-config.yaml | awk '{print \$1}'")"
   [ -n "$new_hash" ] || die "failed to compute config.yaml sha256"
 
-  # Update the config line: replace line 1 with "<new_hash>  /sandbox/.hermes/config.yaml"
+  # Replace line 1 only; the .env and MCP state lines must stay untouched
   remote "awk -v h='${new_hash}' 'NR==1{print h \"  /sandbox/.hermes/config.yaml\"; next} {print}' /tmp/hm-config-hash > /tmp/hm-config-hash.new" \
     || die "failed to update anchor"
   remote "docker cp /tmp/hm-config-hash.new ${cid}:/sandbox/.hermes/.config-hash" \
@@ -238,8 +222,7 @@ sync_config_hash() {
   log_ok "config hash anchor synced (config.yaml → ${new_hash:0:12}...)"
 }
 
-# Restart sandbox container and confirm no drift
-# Usage: restart_sandbox_verify <container-id>
+# Restart the container and confirm no drift. Usage: restart_sandbox_verify <container-id>
 restart_sandbox_verify() {
   local cid="$1"
   log_info "Restarting sandbox container to verify no drift..."
@@ -254,8 +237,7 @@ restart_sandbox_verify() {
   return 0
 }
 
-# Get sandbox container ID (matched by the stable openshell label, not the
-# container name — real names look like openshell-default--<sandbox>-<uuid>)
+# Matched by label, not name: real names look like openshell-default--<sandbox>-<uuid>
 sandbox_container_id() {
   remote "docker ps -a --filter 'label=openshell.ai/sandbox-name=${SANDBOX_NAME}' --format '{{.ID}}' | head -1"
 }
