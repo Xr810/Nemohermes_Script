@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-# 03-openwebui: Open WebUI deployment (clean DB + filter source + systemd)
+# 03-openwebui — Open WebUI install, systemd units, and filter import
+#
 # Usage: ./03-openwebui.sh
-# Note: uses a clean DB (resources/open-webui-fresh.db),
-#       first visit shows the "create admin" screen. After the admin is created,
-#       this script polls for it and auto-imports the filter (Step 3.5).
+#
+# Installs a blank database (resources/open-webui-fresh.db), so the first visit
+# shows the "create admin" screen; step 3.5 polls for that account and then
+# imports the filter. Re-running this step discards existing WebUI users.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

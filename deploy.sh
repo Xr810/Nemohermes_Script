@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================
-# NemoHermes Linux deployment main entry
+# deploy — NemoHermes deployment entry point (wizard + ordered steps)
 #
 # Usage:
-#   ./deploy.sh                # full pipeline
-#   ./deploy.sh --skip-approvals   # skip approvals.mode change
-#   ./deploy.sh --skip-mcp         # skip MCP config
-#   ./deploy.sh --skip-config      # skip wizard, use current config.env
+#   ./deploy.sh                    # full pipeline
+#   ./deploy.sh --skip-approvals   # leave approvals.mode unchanged
+#   ./deploy.sh --skip-mcp         # skip MCP registration
+#   ./deploy.sh --skip-config      # no wizard, use current config.env
 #   ./deploy.sh 01 02 ...          # run only the given steps
+#
+# Each step lives in NN-*.sh and shares lib.sh / config.env. See README.md.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +27,9 @@ for arg in "$@"; do
     --skip-config)    SKIP_CONFIG=1 ;;
     0[1-5])           SELECTED+=("$arg") ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      # Reprint this file's header block, dropping the shebang and rule lines,
+      # so editing the header cannot desync the help text.
+      sed -n '2,/^[^#]/p' "$0" | sed -e '/^[^#]/d' -e '/^# =\{5,\}$/d' -e 's/^# \{0,1\}//'
       exit 0 ;;
     *) die "Unknown argument: $arg (supported: --skip-approvals / --skip-mcp / --skip-config / 01..05)" ;;
   esac

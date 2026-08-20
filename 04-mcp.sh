@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-# 04-mcp: MCP Router bridge (optional, skipped if MCP_URL is empty)
+# 04-mcp — MCP Router bridge (skipped when MCP_URL is empty)
+#
 # Usage: ./04-mcp.sh
 #
-# Registers via `nemoclaw <sandbox> mcp add` (OpenShell managed MCP).
-# Do NOT write the token into the sandbox Hermes config.yaml — that
-# triggers HERMES_MCP_CONFIG_DRIFT and bypasses egress credential injection.
+# Registers through `nemoclaw <sandbox> mcp add` so OpenShell keeps the token
+# host-side. Writing it into the sandbox Hermes config.yaml would trigger
+# HERMES_MCP_CONFIG_DRIFT and bypass egress credential injection.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

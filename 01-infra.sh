@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================
-# 01-infra: Docker + OpenShell/NemoClaw binaries + Gateway
+# 01-infra — Docker, OpenShell/NemoClaw binaries, and sandbox onboarding
+#
 # Usage: ./01-infra.sh
-# Notes: auto-runs the NVIDIA official installer to fill in missing components
-#        (curl https://www.nvidia.com/nemoclaw.sh | bash)
+#
+# Runs the NVIDIA installer (https://www.nvidia.com/nemoclaw.sh) when any
+# component is missing, then onboards until the sandbox reports Ready.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -20,8 +20,8 @@ uv pip install --python "$OPEN_WEBUI_VENV/bin/python" \
   'open-webui==0.9.5' \
   'pypdfium2==5.12.1'
 
-# ---------------------------------------------------------------------------
-# Patch Open WebUI 0.9.5: the first message of a NEW chat sends chat_id=None
+# ---- Patch 1: new-chat chat_id=None crash ----
+# Open WebUI 0.9.5: the first message of a NEW chat sends chat_id=None
 # (the key exists with value None), so .get('chat_id', '') returns None and
 # .startswith() throws — every new chat answers 400 and looks like "no reply".
 # Both occurrences need (or ''). Idempotent.
@@ -51,8 +51,8 @@ else:
     print("Patched open_webui/socket/main.py (chat_id=None crash fix)")
 PYEOF
 
-# ---------------------------------------------------------------------------
-# Patch Open WebUI 0.9.5: uvicorn keep-alive 5s -> 300s. The frontend polls
+# ---- Patch 2: uvicorn keep-alive ----
+# Open WebUI 0.9.5 uses 5s; raise it to 300s. The frontend polls
 # every ~30s, and the port-forward bridge never propagates uvicorn's close, so
 # pooled browser sockets pile up half-open until the whole UI freezes.
 # Idempotent.

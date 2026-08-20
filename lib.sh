@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================
-# Shared library: logging, assertions, sandbox wait, config hash sync helpers
+# lib — shared helpers: logging, config wizard, sandbox and config-hash utils
+#
+# Usage: source lib.sh   (not meant to be executed directly)
 # ============================================================
 
 # ---- Colors ----
@@ -19,7 +21,7 @@ log_step()  { echo; echo -e "${C_BOLD}${C_CYAN}━━━ $* ━━━${C_RESET}"
 
 die() { log_err "$*"; exit 1; }
 
-# ─── Interactive config wizard ───
+# ---- Interactive config wizard ----
 # Enter keeps the current config.env value; required items never silently default.
 prompt_config() {
   local env_file

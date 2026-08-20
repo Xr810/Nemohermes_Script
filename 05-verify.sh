@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================
-# 05-verify: end-to-end verification
+# 05-verify — read-only end-to-end verification
+#
 # Usage: ./05-verify.sh
+#
+# Changes nothing; exits non-zero when any check fails.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,19 +68,19 @@ print((r[0] and r[1]) if r else False)
 FILTER_BOOL="$(echo "${FILTER}" | tr -d "[:space:]")"
 check "filter active+global" "$( [ "${FILTER_BOOL}" = "True" ] || [ "${FILTER_BOOL}" = "1" ] && echo 1 || echo 0 )"
 
-# 7.5. Open WebUI 0.9.5 socket/main.py chat_id=None crash patch present (L5)
+# 8. socket/main.py chat_id=None patch (without it every new chat answers 400)
 SOCKET_PATCH="$(sandbox_exec "grep -c \"(request_info.get('chat_id') or '').startswith('channel:')\" /sandbox/open-webui/.venv/lib/python3.11/site-packages/open_webui/socket/main.py 2>/dev/null" || echo 0)"
 check "socket/main.py chat_id=None patch" "$SOCKET_PATCH"
 
-# 7.6. BYPASS_EMBEDDING_AND_RETRIEVAL enabled in start.sh (L7)
+# 9. BYPASS_EMBEDDING_AND_RETRIEVAL enabled in start.sh (uploads reach Hermes whole)
 BYPASS_SET="$(sandbox_exec "grep -c 'BYPASS_EMBEDDING_AND_RETRIEVAL=True' /sandbox/open-webui/start.sh 2>/dev/null" || echo 0)"
 check "start.sh BYPASS_EMBEDDING_AND_RETRIEVAL=True" "$BYPASS_SET"
 
-# 7.7. uvicorn keep-alive 300s patch present (L10 — prevents browser zombie connections)
+# 10. uvicorn keep-alive 300s patch (prevents half-open browser connections)
 KEEPALIVE_SET="$(sandbox_exec "grep -c 'timeout_keep_alive=300' /sandbox/open-webui/.venv/lib/python3.11/site-packages/open_webui/__init__.py 2>/dev/null" || echo 0)"
 check "uvicorn timeout_keep_alive=300 patch" "$KEEPALIVE_SET"
 
-# 8. MCP (if configured)
+# 11. MCP tool discovery (if configured)
 if [ -n "${MCP_URL:-}" ]; then
   MCP_TOOLS="$(remote "nemoclaw ${SANDBOX_NAME} mcp status mcp-router --json --tools 2>/dev/null" | grep -c '"ok": true' || true)"
   check "MCP tool discovery" "$MCP_TOOLS"
