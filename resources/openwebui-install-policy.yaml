@@ -1,0 +1,36 @@
+# Open WebUI install network policy
+# Allows uv (the Python/venv tool) to download the Python 3.11 standalone
+# build from GitHub and install pip packages from PyPI. The built-in
+# `github` preset only whitelists the git binary, so uv needs its own entry.
+preset:
+  name: openwebui-install
+  description: Allow uv to download Python and packages for the Open WebUI install
+network_policies:
+  openwebui_install:
+    name: openwebui_install
+    endpoints:
+      - host: github.com
+        port: 443
+        access: full
+      # tls: skip must match the preinstalled 'brew' preset, which already
+      # covers this host — different tls metadata on the same endpoint makes
+      # `policy add` fail with "network endpoint ambiguity validation failed".
+      # uv accepts the skipped verification for this one-off build download.
+      - host: objects.githubusercontent.com
+        port: 443
+        tls: skip
+        access: full
+      - host: release-assets.githubusercontent.com
+        port: 443
+        access: full
+      - host: raw.githubusercontent.com
+        port: 443
+        access: full
+      - host: pypi.org
+        port: 443
+        access: full
+      - host: files.pythonhosted.org
+        port: 443
+        access: full
+    binaries:
+      - path: /usr/local/bin/uv
