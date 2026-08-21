@@ -96,9 +96,12 @@ if [ -f "${OPENWEBUI_BRAND_SH:-}" ]; then
 fi
 
 # ---- 3. Place the clean DB ----
-# Upload the fresh DB first, then move it into data/ inside the sandbox.
+# Upload into the directory (trailing slash). A dest named *.db is treated as a
+# folder by nemoclaw upload, so the file would land at *.db/*.db and cp would fail.
 log_info "Placing clean database (first visit = create admin)..."
-remote "nemoclaw ${SANDBOX_NAME} upload ${OPENWEBUI_FRESH_DB} ${OPENWEBUI_DIR}/open-webui-fresh.db" \
+sandbox_exec "rm -rf ${OPENWEBUI_DIR}/open-webui-fresh.db" \
+  || log_warn "Could not remove leftover ${OPENWEBUI_DIR}/open-webui-fresh.db"
+remote "nemoclaw ${SANDBOX_NAME} upload ${OPENWEBUI_FRESH_DB} ${OPENWEBUI_DIR}/" \
   || die "Failed to upload clean DB"
 # sh -c keeps the whole && chain inside the sandbox (eval would split it and run
 # the tail commands on the host)
