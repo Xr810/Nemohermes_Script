@@ -73,6 +73,9 @@ require_inference_config() {
 
 log_step "Step 1/5: Infrastructure (Docker + OpenShell/NemoClaw + Gateway)"
 
+sandbox_name_valid "${SANDBOX_NAME:-}" \
+  || die "Invalid sandbox name: '${SANDBOX_NAME:-}'. Allowed: 1-19 lowercase letters/digits, start with a letter, single hyphens only (e.g. je-final-test)"
+
 NEMOCLAW_INSTALL_URL="https://www.nvidia.com/nemoclaw.sh"
 
 # ---- Detect missing components ----

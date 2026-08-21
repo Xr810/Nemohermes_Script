@@ -21,6 +21,20 @@ log_step()  { echo; echo -e "${C_BOLD}${C_CYAN}━━━ $* ━━━${C_RESET}"
 
 die() { log_err "$*"; exit 1; }
 
+# NemoClaw onboard: 1-19 chars, lowercase, starts with a letter,
+# letters/digits/single internal hyphens only, ends with a letter or digit.
+sandbox_name_valid() {
+  local name="${1:-}"
+  local n=${#name}
+  [ "$n" -ge 1 ] && [ "$n" -le 19 ] || return 1
+  case "$name" in *--*) return 1 ;; esac
+  [[ "$name" =~ ^[a-z]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+sandbox_name_suggest() {
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '_' '-'
+}
+
 # ---- Interactive config wizard ----
 # Enter keeps the current config.env value; required items never silently default.
 prompt_config() {
@@ -117,18 +131,30 @@ prompt_config() {
     *) log_warn "Invalid value, using manual"; APPROVALS_MODE="manual" ;;
   esac
 
-  # 7. Sandbox name (required)
+  # 7. Sandbox name (required; reject invalid names instead of warning)
   echo -e "${C_YELLOW}7) Sandbox name (required; lowercase letters/digits/hyphens, e.g. main / dev / je-accept)${C_RESET}"
   echo -e "   current: ${cur_sandbox:-<none>}"
   while :; do
     read -r -p "   > " SANDBOX_NAME
-    [ -n "$SANDBOX_NAME" ] && break
-    [ -n "$cur_sandbox" ] && { SANDBOX_NAME="$cur_sandbox"; break; }
-    log_warn "Sandbox name is required (onboard creates it)"
+    if [ -z "$SANDBOX_NAME" ]; then
+      if [ -n "$cur_sandbox" ]; then
+        SANDBOX_NAME="$cur_sandbox"
+      else
+        log_err "Sandbox name is required (onboard creates it). Re-enter"
+        continue
+      fi
+    fi
+    if sandbox_name_valid "$SANDBOX_NAME"; then
+      break
+    fi
+    local suggest
+    suggest="$(sandbox_name_suggest "$SANDBOX_NAME")"
+    if sandbox_name_valid "$suggest" && [ "$suggest" != "$SANDBOX_NAME" ]; then
+      log_err "Invalid sandbox name: '${SANDBOX_NAME}'. Re-enter (try: ${suggest})"
+    else
+      log_err "Invalid sandbox name: '${SANDBOX_NAME}'. Re-enter — 1-19 chars, lowercase, start with a letter, letters/digits/single hyphens only"
+    fi
   done
-  case "$SANDBOX_NAME" in
-    *[!a-z0-9-]*|"") log_warn "Sandbox name should be lowercase letters/digits/hyphens only: '${SANDBOX_NAME}'" ;;
-  esac
 
   # Persist to config.env (| delimiter survives the / in URLs)
   if [ -f "$env_file" ]; then
