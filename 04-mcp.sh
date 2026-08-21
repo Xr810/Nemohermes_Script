@@ -25,8 +25,8 @@ log_info "Registering with: nemoclaw ${SANDBOX_NAME} mcp add mcp-router --url <u
 
 wait_sandbox_ready || exit 1
 
-# Token: wizard already collected it into MCP_ROUTER_TOKEN (not written to disk).
-# Fallback prompt if this step is re-run alone without the wizard.
+# Token: wizard saved it to secrets.env (loaded by load_config). Fallback prompt
+# if this step is re-run alone with no secrets file.
 if [ -z "${MCP_ROUTER_TOKEN:-}" ]; then
   echo -e "${C_YELLOW}MCP Router token (visible input; raw token only, no 'Bearer ' prefix)${C_RESET}"
   read -r -p "   > " MCP_ROUTER_TOKEN
@@ -35,8 +35,7 @@ if [ -z "${MCP_ROUTER_TOKEN:-}" ]; then
   MCP_ROUTER_TOKEN="${MCP_ROUTER_TOKEN#bearer }"
 fi
 [ -n "${MCP_ROUTER_TOKEN:-}" ] || die "MCP Router token is required when MCP_URL is set.
-  Re-run ./deploy.sh and paste it at question 5, or:
-  export MCP_ROUTER_TOKEN='...'  then  ./deploy.sh 04"
+  Re-run ./deploy.sh and paste it at question 5 (it is then saved in secrets.env)."
 
 # Idempotent: skip add if already registered
 if remote "nemoclaw ${SANDBOX_NAME} mcp list --json 2>/dev/null" | grep -q "mcp-router"; then

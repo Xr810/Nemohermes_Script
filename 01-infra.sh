@@ -66,8 +66,7 @@ check_user_manager_docker_group() {
 require_inference_config() {
   if [ -z "${INFERENCE_BASE_URL:-}" ] || [ -z "${INFERENCE_MODEL:-}" ] || [ -z "${INFERENCE_API_KEY:-}" ]; then
     die "Missing required inference config: URL/model/key must all be set.
-  Wizard enforces URL and model; the API key needs wizard item 3 or:
-  export INFERENCE_API_KEY='...'  then  ./deploy.sh  (Enter keeps the env value)"
+  Wizard enforces URL and model; the API key is saved in secrets.env after the first run."
   fi
 }
 

@@ -35,6 +35,38 @@ sandbox_name_suggest() {
   printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '_' '-'
 }
 
+# API key / MCP token: gitignored secrets.env, so the mandatory first-run reboot
+# does not require pasting them again.
+secrets_path() {
+  printf '%s' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/secrets.env"
+}
+
+load_secrets() {
+  local f
+  f="$(secrets_path)"
+  [ -f "$f" ] || return 0
+  # shellcheck disable=SC1090
+  set -a
+  source "$f"
+  set +a
+}
+
+save_secrets() {
+  local f tmp
+  f="$(secrets_path)"
+  tmp="${f}.tmp.$$"
+  (
+    umask 077
+    {
+      printf '%s\n' '# Local secrets for ./deploy.sh. Gitignored; do not commit.'
+      printf 'INFERENCE_API_KEY=%q\n' "${INFERENCE_API_KEY:-}"
+      printf 'MCP_ROUTER_TOKEN=%q\n' "${MCP_ROUTER_TOKEN:-}"
+    } > "$tmp"
+    mv "$tmp" "$f"
+  )
+  chmod 600 "$f"
+}
+
 # ---- Interactive config wizard ----
 # Enter keeps the current config.env value; required items never silently default.
 prompt_config() {
@@ -76,20 +108,20 @@ prompt_config() {
     log_warn "Model name is required (onboard configures it). Type the model id of your endpoint"
   done
 
-  # 3. API key (visible input; only the prefix is echoed back)
-  echo -e "${C_YELLOW}3) Inference API key (visible input; Enter = keep env INFERENCE_API_KEY)${C_RESET}"
+  # 3. API key — reuse secrets.env after the first-run reboot; only prompt if missing
   if [ -n "${INFERENCE_API_KEY:-}" ]; then
-    echo -e "   current: (from env INFERENCE_API_KEY, prefix $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)...) — Enter keeps it"
+    log_info "3) Inference API key: $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..."
   else
+    echo -e "${C_YELLOW}3) Inference API key (visible input; saved to secrets.env for the reboot rerun)${C_RESET}"
     echo -e "   current: <none>"
-  fi
-  read -r -p "   > " API_KEY_INPUT
-  echo
-  if [ -n "$API_KEY_INPUT" ]; then
-    printf -v INFERENCE_API_KEY '%s' "$API_KEY_INPUT"
-    echo -e "   (recorded, prefix $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..., total $(printf '%s' "$INFERENCE_API_KEY" | wc -c | tr -d ' ') chars)"
-  elif [ -z "${INFERENCE_API_KEY:-}" ]; then
-    log_warn "No API key set — onboard will fail. Paste it above, or export INFERENCE_API_KEY and rerun"
+    read -r -p "   > " API_KEY_INPUT
+    echo
+    if [ -n "$API_KEY_INPUT" ]; then
+      printf -v INFERENCE_API_KEY '%s' "$API_KEY_INPUT"
+      echo -e "   ($(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..., $(printf '%s' "$INFERENCE_API_KEY" | wc -c | tr -d ' ') chars)"
+    else
+      log_warn "No API key set — onboard will fail. Paste it above, or put INFERENCE_API_KEY in secrets.env"
+    fi
   fi
 
   # 4. MCP URL (optional)
@@ -98,24 +130,23 @@ prompt_config() {
   read -r -p "   > " MCP_URL
   [ -n "$MCP_URL" ] || MCP_URL="${cur_mcp:-}"
 
-  # 4b. MCP token — only when a URL is set. Never written to config.env;
-  # `nemoclaw mcp add` keeps it host-side and the sandbox sees a placeholder.
+  # 5. MCP token — reuse secrets.env after reboot; only prompt if URL is set and token is missing
   if [ -n "${MCP_URL:-}" ]; then
-    echo -e "${C_YELLOW}5) MCP Router token (visible input; raw token only, no 'Bearer ' prefix)${C_RESET}"
     if [ -n "${MCP_ROUTER_TOKEN:-}" ]; then
-      echo -e "   current: (from env MCP_ROUTER_TOKEN, prefix $(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)...) — Enter keeps it"
+      log_info "5) MCP Router token: $(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..."
     else
+      echo -e "${C_YELLOW}5) MCP Router token (visible input; raw token only, no 'Bearer ' prefix)${C_RESET}"
       echo -e "   current: <none>"
-    fi
-    read -r -p "   > " MCP_TOKEN_INPUT
-    echo
-    if [ -n "$MCP_TOKEN_INPUT" ]; then
-      MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#Bearer }"
-      MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#bearer }"
-      printf -v MCP_ROUTER_TOKEN '%s' "$MCP_TOKEN_INPUT"
-      echo -e "   (recorded, prefix $(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..., total $(printf '%s' "$MCP_ROUTER_TOKEN" | wc -c | tr -d ' ') chars)"
-    elif [ -z "${MCP_ROUTER_TOKEN:-}" ]; then
-      die "MCP URL is set but no token was entered. Paste the Router token, or leave the URL blank to skip MCP"
+      read -r -p "   > " MCP_TOKEN_INPUT
+      echo
+      if [ -n "$MCP_TOKEN_INPUT" ]; then
+        MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#Bearer }"
+        MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#bearer }"
+        printf -v MCP_ROUTER_TOKEN '%s' "$MCP_TOKEN_INPUT"
+        echo -e "   ($(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..., $(printf '%s' "$MCP_ROUTER_TOKEN" | wc -c | tr -d ' ') chars)"
+      else
+        die "MCP URL is set but no token was entered. Paste the Router token, or leave the URL blank to skip MCP"
+      fi
     fi
   else
     MCP_ROUTER_TOKEN=""
@@ -166,13 +197,15 @@ prompt_config() {
       -e "s|^SANDBOX_NAME=.*|SANDBOX_NAME=\"${SANDBOX_NAME}\"|" \
       "$env_file"
     rm -f "$env_file.bak"
-    log_ok "Config saved to config.env (API key and MCP token kept in-memory only)"
+    log_ok "Config saved to config.env"
   fi
+  save_secrets
+  log_ok "API key and MCP token saved to secrets.env (gitignored; reused after reboot)"
 
   echo
   log_info "Confirmed: sandbox=${SANDBOX_NAME}  inference=${INFERENCE_BASE_URL}  model=${INFERENCE_MODEL}  approvals=${APPROVALS_MODE}"
   if [ -n "${MCP_URL:-}" ]; then
-    log_info "MCP=${MCP_URL} (token in-memory only, will register via nemoclaw mcp add)"
+    log_info "MCP=${MCP_URL} (token from secrets.env, registered via nemoclaw mcp add)"
   else
     log_info "MCP=skip"
   fi
@@ -191,6 +224,7 @@ load_config() {
   dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # shellcheck disable=SC1091
   source "${dir}/config.env"
+  load_secrets
 }
 
 # Empty REMOTE_HOST = run locally; set = run over ssh (remote deploy)

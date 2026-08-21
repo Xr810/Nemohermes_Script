@@ -47,21 +47,18 @@ never fall back to a silent default.
 |---|---|---|
 | 1 | Inference base URL | Required. OpenAI-compatible, e.g. `https://openrouter.ai/api/v1` |
 | 2 | Default model name | Required, e.g. `DeepSeek-V4-Flash` |
-| 3 | Inference API key | Visible input; only the prefix is echoed back |
+| 3 | Inference API key | Visible input; only the first few characters are echoed back |
 | 4 | MCP Router URL | Optional. Leave blank to skip MCP entirely |
 | 5 | MCP Router token | Only asked when 4 is set. Raw token, no `Bearer ` prefix |
 | 6 | Approval mode | `off` (no prompts) / `smart` / `manual` (default) |
 | 7 | Sandbox name | Required. Lowercase letters, digits, hyphens |
 
-Answers for 1, 2, 4, 6, 7 are written back to `config.env`. **The API key and the
-MCP token are never written to disk** — they live in memory for that run only, so
-every run asks for them again. To avoid re-pasting:
+Answers for 1, 2, 4, 6, 7 are written back to `config.env`. The API key and MCP
+token are written to `secrets.env` (gitignored, mode 600) so the **mandatory
+first-run reboot** does not ask for them again. After reboot, just run
+`./deploy.sh` — items 3 and 5 are skipped when those values are already saved.
 
-```bash
-export INFERENCE_API_KEY='sk-...'
-export MCP_ROUTER_TOKEN='...'
-./deploy.sh              # press Enter at the key/token prompts
-```
+To replace a key later, edit `secrets.env` or delete it and re-run the wizard.
 
 Do not point the base URL at `https://inference.local/v1`. That name only exists
 inside the sandbox and the onboard probe will fail.
@@ -91,7 +88,8 @@ cannot reach `/var/run/docker.sock`. The script detects this and stops:
 ```
 
 Reboot the host, then run `./deploy.sh` again. The second run skips the
-installer and continues at onboard.
+installer, reuses the API key and MCP token from `secrets.env`, and continues at
+onboard.
 
 | Environment | How to reboot |
 |---|---|
@@ -187,7 +185,7 @@ reinstall from scratch.
 | `AGENT` | `hermes` | Agent runtime; keep as is |
 | `INFERENCE_BASE_URL` | — | OpenAI-compatible endpoint; required |
 | `INFERENCE_MODEL` | — | Default model; required |
-| `INFERENCE_API_KEY` | from env | Never written to the file |
+| `INFERENCE_API_KEY` | from `secrets.env` | Gitignored; not written to `config.env` |
 | `APPROVALS_MODE` | `manual` | `off` / `smart` / `manual`; empty skips step 2 |
 | `MCP_URL` | empty | Public HTTPS MCP Router; empty skips step 4 |
 | `MCP_ENV_VAR` | `MCP_ROUTER_TOKEN` | Name of the credential variable, not the token |
@@ -202,8 +200,8 @@ Environment variables the scripts honour:
 
 | Variable | Effect |
 |---|---|
-| `INFERENCE_API_KEY` | Pre-fills wizard item 3 |
-| `MCP_ROUTER_TOKEN` | Pre-fills wizard item 5 |
+| `INFERENCE_API_KEY` | Pre-fills / skips wizard item 3; also loaded from `secrets.env` |
+| `MCP_ROUTER_TOKEN` | Pre-fills / skips wizard item 5; also loaded from `secrets.env` |
 | `REMOTE_HOST` | Run every command over SSH against that host instead of locally |
 | `UNIT_DIR` | Override the systemd user unit directory |
 | `LIBEXEC_DIR` | Override the helper script directory |
