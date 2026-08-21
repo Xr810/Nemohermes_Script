@@ -72,7 +72,7 @@ inside the sandbox and the onboard probe will fail.
 |---|---|---|
 | 1 | `01-infra.sh` | Preflight (DNS, docker group, inference config); `apt-get install git curl binutils zstd lsof`; run the NVIDIA installer when components are missing; `nemoclaw onboard` until the sandbox is Ready |
 | 2 | `02-hermes.sh` | Set `approvals.mode`, sync the Hermes config-hash anchor, restart the container to confirm no drift (rolls back on failure) |
-| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5); install a blank database; write systemd units; start Open WebUI and the port-forward; wait for the admin account, then import the filter |
+| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5); install a blank database; write systemd units; enable and start Open WebUI and the port-forward; wait for the admin account, then import the filter |
 | 4 | `04-mcp.sh` | `nemoclaw <sandbox> mcp add mcp-router`, then probe credentials and tool discovery. Skipped when the MCP URL is empty |
 | 5 | `05-verify.sh` | Read-only checks; exits non-zero if anything failed |
 
@@ -129,6 +129,7 @@ Step 5 checks, without changing anything:
 
 - sandbox is Ready, `nemoclaw doctor` reports ok, Hermes reports a version
 - `approvals.mode` matches the configured value (skipped if unset)
+- Open WebUI systemd user units are enabled (so they return after a host reboot)
 - Open WebUI serves static assets over the forwarded port (HTTP 200)
 - an admin exists and the filter is active and global
 - the three Open WebUI patches are present (new-chat `chat_id`, embedding bypass, uvicorn keep-alive)

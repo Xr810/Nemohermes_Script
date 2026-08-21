@@ -74,8 +74,8 @@ another machine, forward ports `3000` and `18789` over SSH.
 
 ## Service management
 
-Two user units are created by step 3. They are enabled for `default.target`, so
-they come back after a reboot once the gateway is up.
+Two user units are created by step 3. The step runs `systemctl --user enable --now`
+and enables lingering, so they come back after a host reboot once the gateway is up.
 
 ```bash
 systemctl --user status  je-open-webui.service

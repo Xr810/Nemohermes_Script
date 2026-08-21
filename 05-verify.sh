@@ -44,12 +44,20 @@ else
   log_info "approvals.mode = ${AMODE:-unknown} (no change requested)"
 fi
 
-# 5. Open WebUI static assets (via forward or direct probe)
+# 5. Open WebUI units enabled (survive host reboot; WantedBy alone is not enough)
+WEBUI_ENABLED="$(systemctl --user is-enabled je-open-webui.service 2>/dev/null || true)"
+check "je-open-webui enabled" "$( [ "$WEBUI_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
+if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
+  FWD_ENABLED="$(systemctl --user is-enabled je-open-webui-forward.service 2>/dev/null || true)"
+  check "je-open-webui-forward enabled" "$( [ "$FWD_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
+fi
+
+# 6. Open WebUI static assets (via forward or direct probe)
 WEBUI_URL="http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
 LOADER_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "${WEBUI_URL}/static/loader.js" 2>/dev/null || echo 000)"
 check "Open WebUI static assets (${LOADER_CODE})" "$( [ "$LOADER_CODE" = "200" ] && echo 1 || echo 0 )"
 
-# 6. Admin exists (if created)
+# 7. Admin exists (if created)
 ADMIN="$(sandbox_exec "python3 -c \"
 import sqlite3
 c = sqlite3.connect('file:/sandbox/open-webui/data/webui.db?mode=ro', uri=True)
@@ -57,7 +65,7 @@ print(c.execute(\\\"SELECT COUNT(*) FROM user WHERE role='admin'\\\").fetchone()
 \"" 2>/dev/null | tail -1 || echo 0)"
 check "Admin created" "$( [ "${ADMIN:-0}" -ge 1 ] && echo 1 || echo 0 )"
 
-# 7. Filter active (if admin created)
+# 8. Filter active (if admin created)
 FILTER="$(sandbox_exec "python3 -c \"
 import sqlite3
 c = sqlite3.connect('file:/sandbox/open-webui/data/webui.db?mode=ro', uri=True)
@@ -68,19 +76,19 @@ print((r[0] and r[1]) if r else False)
 FILTER_BOOL="$(echo "${FILTER}" | tr -d "[:space:]")"
 check "filter active+global" "$( [ "${FILTER_BOOL}" = "True" ] || [ "${FILTER_BOOL}" = "1" ] && echo 1 || echo 0 )"
 
-# 8. socket/main.py chat_id=None patch (without it every new chat answers 400)
+# 9. socket/main.py chat_id=None patch (without it every new chat answers 400)
 SOCKET_PATCH="$(sandbox_exec "grep -c \"(request_info.get('chat_id') or '').startswith('channel:')\" /sandbox/open-webui/.venv/lib/python3.11/site-packages/open_webui/socket/main.py 2>/dev/null" || echo 0)"
 check "socket/main.py chat_id=None patch" "$SOCKET_PATCH"
 
-# 9. BYPASS_EMBEDDING_AND_RETRIEVAL enabled in start.sh (uploads reach Hermes whole)
+# 10. BYPASS_EMBEDDING_AND_RETRIEVAL enabled in start.sh (uploads reach Hermes whole)
 BYPASS_SET="$(sandbox_exec "grep -c 'BYPASS_EMBEDDING_AND_RETRIEVAL=True' /sandbox/open-webui/start.sh 2>/dev/null" || echo 0)"
 check "start.sh BYPASS_EMBEDDING_AND_RETRIEVAL=True" "$BYPASS_SET"
 
-# 10. uvicorn keep-alive 300s patch (prevents half-open browser connections)
+# 11. uvicorn keep-alive 300s patch (prevents half-open browser connections)
 KEEPALIVE_SET="$(sandbox_exec "grep -c 'timeout_keep_alive=300' /sandbox/open-webui/.venv/lib/python3.11/site-packages/open_webui/__init__.py 2>/dev/null" || echo 0)"
 check "uvicorn timeout_keep_alive=300 patch" "$KEEPALIVE_SET"
 
-# 11. MCP tool discovery (if configured)
+# 12. MCP tool discovery (if configured)
 if [ -n "${MCP_URL:-}" ]; then
   MCP_TOOLS="$(remote "nemoclaw ${SANDBOX_NAME} mcp status mcp-router --json --tools 2>/dev/null" | grep -c '"ok": true' || true)"
   check "MCP tool discovery" "$MCP_TOOLS"

@@ -187,17 +187,27 @@ fi
 
 systemctl --user daemon-reload
 
-# ---- 6. Start ----
-log_info "Starting Open WebUI..."
+# User systemd only starts at boot when lingering is on; otherwise units wait
+# for a login session. enable --now without linger still helps after SSH/orb login.
+if [ "$(loginctl show-user "${USER}" -p Linger --value 2>/dev/null || true)" != "yes" ]; then
+  loginctl enable-linger "${USER}" 2>/dev/null \
+    || sudo loginctl enable-linger "${USER}" \
+    || log_warn "Could not enable lingering for ${USER}; after reboot, log in once so user systemd can start Open WebUI"
+fi
+
+# ---- 6. Enable and start ----
+# enable writes the default.target.wants symlink so both units come back after
+# a host reboot. --now also starts them for this deploy.
+log_info "Enabling and starting Open WebUI..."
 # start.sh needs exec permission (uploaded files default to 644)
 sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \
   || log_warn "chmod +x start.sh failed"
 # Clear any failed state from earlier runs before starting
 systemctl --user reset-failed je-open-webui.service 2>/dev/null || true
-systemctl --user start je-open-webui.service || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
+systemctl --user enable --now je-open-webui.service || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
 sleep 5
 if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
-  systemctl --user start je-open-webui-forward.service || log_warn "forward start failed (can retry later)"
+  systemctl --user enable --now je-open-webui-forward.service || log_warn "forward start failed (can retry later)"
 fi
 
 # ---- 7. Wait for admin creation + import filter ----
