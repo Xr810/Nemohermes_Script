@@ -136,6 +136,31 @@ Step 5 checks, without changing anything:
 
 Re-run it any time with `./deploy.sh 05`.
 
+## Where to click after deploy
+
+These are three different surfaces. Day-to-day chat is Open WebUI; the other two
+are operator consoles. All bind to loopback on the **deployment host**.
+
+| Surface | How to open it |
+|---|---|
+| Open WebUI (chat) | Browser: `http://127.0.0.1:3000` |
+| Hermes dashboard | Browser: `http://127.0.0.1:18789/` |
+| OpenShell gateway TUI | Terminal on the host: `openshell term` |
+
+NemoClaw's Hermes agent also exposes an OpenAI-compatible API at
+`http://127.0.0.1:8642/v1` (health: `http://127.0.0.1:8642/health`). That is not
+a webpage. Port `19119` is the dashboard's bind *inside* the sandbox; you do not
+open that from the host.
+
+If the browser is not on the Linux host, tunnel the same way as Open WebUI:
+
+```bash
+ssh -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:18789:127.0.0.1:18789 user@server
+```
+
+Confirm what is actually forwarded with `openshell -g nemoclaw forward list`.
+Commands, keys, and the Hermes CLI TUI are in [OPERATIONS.md](OPERATIONS.md).
+
 ## Command-line options
 
 ```bash

@@ -47,6 +47,38 @@ Open WebUI shows a single Hermes agent model. Its base URL points at the Hermes
 API server, not at your provider, so **switching models is a gateway change, not
 an Open WebUI setting**.
 
+## Consoles and URLs
+
+There is no separate “OpenShell website.” The gateway is a host process; its
+interactive console is a TUI. Hermes has a browser dashboard in addition to
+Open WebUI.
+
+| Surface | Open it |
+|---|---|
+| Open WebUI (end-user chat) | `http://127.0.0.1:3000` |
+| Hermes dashboard (agent operator UI) | `http://127.0.0.1:18789/` |
+| Hermes OpenAI-compatible API | `http://127.0.0.1:8642/v1` (not a webpage; health at `/health`) |
+| OpenShell gateway TUI | `openshell term` on the deployment host |
+| Hermes CLI / dashboard TUI | `nemoclaw <sandbox> exec -- hermes dashboard --tui` |
+
+Onboard (step 1) is what publishes `18789` and `8642` to the host. This repo’s
+`FORWARD_PORTS` in `config.env` is unused; do not expect changing it to move
+the dashboard. Inside the sandbox the dashboard listens on `19119` and the API
+on `18642`; those are not host URLs.
+
+```bash
+openshell -g nemoclaw forward list    # confirm 18789 / 8642 / 3000
+openshell term                        # OpenShell TUI: sandboxes, providers, live egress
+nemoclaw <sandbox> exec -- hermes dashboard --tui
+```
+
+`openshell term` is keyboard-driven (`q` quits). Use it for live network
+approvals and gateway state. Use the Hermes dashboard when you want the agent’s
+own UI (sessions, skills, approvals). Keep using Open WebUI for the chat
+front end this deploy installs.
+
+Remote browser: tunnel `3000` and `18789` to your laptop, same as in README.
+
 ## Service management
 
 Two user units are created by step 3. They are enabled for `default.target`, so
