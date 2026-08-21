@@ -115,7 +115,7 @@ screen. The script prints the URL and polls for the account:
 |---|---|
 | On the Linux host (desktop) | Open the printed URL directly |
 | OrbStack VM, browser on macOS | The printed address usually works (OrbStack maps the port) |
-| Remote server, browser elsewhere | `localhost` is your laptop, not the server. Use a tunnel: `ssh -L 127.0.0.1:3000:127.0.0.1:3000 user@server` |
+| Remote server, browser elsewhere | `localhost` resolves to the browser's own machine, not the server. Use a tunnel: `ssh -L 127.0.0.1:3000:127.0.0.1:3000 user@server` |
 
 Once the admin exists, the script imports the `hermes_source_files` filter and
 enables it globally. The filter hands direct chat uploads to Hermes as whole
@@ -136,30 +136,25 @@ Step 5 checks, without changing anything:
 
 Re-run it any time with `./deploy.sh 05`.
 
-## Where to click after deploy
+## Access points
 
-These are three different surfaces. Day-to-day chat is Open WebUI; the other two
-are operator consoles. All bind to loopback on the **deployment host**.
+Onboard publishes these on the deployment host, all bound to loopback. Open WebUI
+is the chat interface; the others are operator surfaces.
 
-| Surface | How to open it |
+| Interface | Address |
 |---|---|
-| Open WebUI (chat) | Browser: `http://127.0.0.1:3000` |
-| Hermes dashboard | Browser: `http://127.0.0.1:18789/` |
-| OpenShell gateway TUI | Terminal on the host: `openshell term` |
+| Open WebUI | `http://127.0.0.1:3000` |
+| Hermes dashboard | `http://127.0.0.1:18789/` |
+| Hermes API (OpenAI-compatible) | `http://127.0.0.1:8642/v1`, health at `/health` |
+| OpenShell gateway TUI | `openshell term` (terminal, not a URL) |
 
-NemoClaw's Hermes agent also exposes an OpenAI-compatible API at
-`http://127.0.0.1:8642/v1` (health: `http://127.0.0.1:8642/health`). That is not
-a webpage. Port `19119` is the dashboard's bind *inside* the sandbox; you do not
-open that from the host.
-
-If the browser is not on the Linux host, tunnel the same way as Open WebUI:
+To reach the web interfaces from another machine, forward both ports over SSH:
 
 ```bash
 ssh -L 127.0.0.1:3000:127.0.0.1:3000 -L 127.0.0.1:18789:127.0.0.1:18789 user@server
 ```
 
-Confirm what is actually forwarded with `openshell -g nemoclaw forward list`.
-Commands, keys, and the Hermes CLI TUI are in [OPERATIONS.md](OPERATIONS.md).
+See [OPERATIONS.md](OPERATIONS.md) for what each surface is for.
 
 ## Command-line options
 
