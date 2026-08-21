@@ -108,20 +108,20 @@ prompt_config() {
     log_warn "Model name is required (onboard configures it). Type the model id of your endpoint"
   done
 
-  # 3. API key — reuse secrets.env after the first-run reboot; only prompt if missing
+  # 3. API key — always prompt; Enter keeps secrets.env value, typing replaces it
+  echo -e "${C_YELLOW}3) Inference API key (visible input; Enter = keep saved value)${C_RESET}"
   if [ -n "${INFERENCE_API_KEY:-}" ]; then
-    log_info "3) Inference API key: $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..."
+    echo -e "   current: (secrets.env, $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)...) — Enter keeps it"
   else
-    echo -e "${C_YELLOW}3) Inference API key (visible input; saved to secrets.env for the reboot rerun)${C_RESET}"
     echo -e "   current: <none>"
-    read -r -p "   > " API_KEY_INPUT
-    echo
-    if [ -n "$API_KEY_INPUT" ]; then
-      printf -v INFERENCE_API_KEY '%s' "$API_KEY_INPUT"
-      echo -e "   ($(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..., $(printf '%s' "$INFERENCE_API_KEY" | wc -c | tr -d ' ') chars)"
-    else
-      log_warn "No API key set — onboard will fail. Paste it above, or put INFERENCE_API_KEY in secrets.env"
-    fi
+  fi
+  read -r -p "   > " API_KEY_INPUT
+  echo
+  if [ -n "$API_KEY_INPUT" ]; then
+    printf -v INFERENCE_API_KEY '%s' "$API_KEY_INPUT"
+    echo -e "   ($(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)..., $(printf '%s' "$INFERENCE_API_KEY" | wc -c | tr -d ' ') chars)"
+  elif [ -z "${INFERENCE_API_KEY:-}" ]; then
+    log_warn "No API key set — onboard will fail. Paste it above, or put INFERENCE_API_KEY in secrets.env"
   fi
 
   # 4. MCP URL (optional)
@@ -130,37 +130,42 @@ prompt_config() {
   read -r -p "   > " MCP_URL
   [ -n "$MCP_URL" ] || MCP_URL="${cur_mcp:-}"
 
-  # 5. MCP token — reuse secrets.env after reboot; only prompt if URL is set and token is missing
+  # 5. MCP token — always prompt when URL is set; Enter keeps secrets.env value
   if [ -n "${MCP_URL:-}" ]; then
+    echo -e "${C_YELLOW}5) MCP Router token (visible input; Enter = keep saved value)${C_RESET}"
     if [ -n "${MCP_ROUTER_TOKEN:-}" ]; then
-      log_info "5) MCP Router token: $(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..."
+      echo -e "   current: (secrets.env, $(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)...) — Enter keeps it"
     else
-      echo -e "${C_YELLOW}5) MCP Router token (visible input; raw token only, no 'Bearer ' prefix)${C_RESET}"
       echo -e "   current: <none>"
-      read -r -p "   > " MCP_TOKEN_INPUT
-      echo
-      if [ -n "$MCP_TOKEN_INPUT" ]; then
-        MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#Bearer }"
-        MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#bearer }"
-        printf -v MCP_ROUTER_TOKEN '%s' "$MCP_TOKEN_INPUT"
-        echo -e "   ($(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..., $(printf '%s' "$MCP_ROUTER_TOKEN" | wc -c | tr -d ' ') chars)"
-      else
-        die "MCP URL is set but no token was entered. Paste the Router token, or leave the URL blank to skip MCP"
-      fi
+    fi
+    read -r -p "   > " MCP_TOKEN_INPUT
+    echo
+    if [ -n "$MCP_TOKEN_INPUT" ]; then
+      MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#Bearer }"
+      MCP_TOKEN_INPUT="${MCP_TOKEN_INPUT#bearer }"
+      printf -v MCP_ROUTER_TOKEN '%s' "$MCP_TOKEN_INPUT"
+      echo -e "   ($(printf '%s' "$MCP_ROUTER_TOKEN" | cut -c1-4)..., $(printf '%s' "$MCP_ROUTER_TOKEN" | wc -c | tr -d ' ') chars)"
+    elif [ -z "${MCP_ROUTER_TOKEN:-}" ]; then
+      die "MCP URL is set but no token was entered. Paste the Router token, or leave the URL blank to skip MCP"
     fi
   else
     MCP_ROUTER_TOKEN=""
   fi
 
-  # 6. Approval mode
+  # 6. Approval mode (invalid input must be re-entered; Enter keeps current)
   echo -e "${C_YELLOW}6) Approval mode [off=no prompts / smart=auto low-risk / manual=prompt]${C_RESET}"
   echo -e "   current: ${cur_approvals:-manual}"
-  read -r -p "   > " APPROVALS_MODE
-  [ -n "$APPROVALS_MODE" ] || APPROVALS_MODE="${cur_approvals:-manual}"
-  case "$APPROVALS_MODE" in
-    manual|smart|off) ;;
-    *) log_warn "Invalid value, using manual"; APPROVALS_MODE="manual" ;;
-  esac
+  while :; do
+    read -r -p "   > " APPROVALS_MODE
+    if [ -z "$APPROVALS_MODE" ]; then
+      APPROVALS_MODE="${cur_approvals:-manual}"
+      break
+    fi
+    case "$APPROVALS_MODE" in
+      manual|smart|off) break ;;
+      *) log_err "Invalid approval mode: '${APPROVALS_MODE}'. Re-enter — off, smart, or manual" ;;
+    esac
+  done
 
   # 7. Sandbox name (required; reject invalid names instead of warning)
   echo -e "${C_YELLOW}7) Sandbox name (required; lowercase letters/digits/hyphens, e.g. main / dev / je-accept)${C_RESET}"

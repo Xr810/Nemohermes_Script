@@ -56,7 +56,8 @@ never fall back to a silent default.
 Answers for 1, 2, 4, 6, 7 are written back to `config.env`. The API key and MCP
 token are written to `secrets.env` (gitignored, mode 600) so the **mandatory
 first-run reboot** does not ask for them again. After reboot, just run
-`./deploy.sh` — items 3 and 5 are skipped when those values are already saved.
+`./deploy.sh` — items 3 and 5 show the saved prefix; press Enter to keep
+them or paste a new value to replace.
 
 To replace a key later, edit `secrets.env` or delete it and re-run the wizard.
 
