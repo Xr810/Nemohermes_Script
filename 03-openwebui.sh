@@ -31,7 +31,11 @@ log_info "Uploading Open WebUI files to the sandbox..."
 OPENWEBUI_DIR="/sandbox/open-webui"
 
 for f in "$OPENWEBUI_START_SH" "$OPENWEBUI_INSTALL_SH" "$OPENWEBUI_PDF_TOOL" \
-         "$OPENWEBUI_FILTER_SRC" "$OPENWEBUI_FILTER_INSTALLER"; do
+         "$OPENWEBUI_FILTER_SRC" "$OPENWEBUI_FILTER_INSTALLER" \
+         ${OPENWEBUI_BRAND_ICON:+"$OPENWEBUI_BRAND_ICON"} \
+         ${OPENWEBUI_BRAND_LOGO:+"$OPENWEBUI_BRAND_LOGO"} \
+         ${OPENWEBUI_BRAND_SH:+"$OPENWEBUI_BRAND_SH"}; do
+  [ -f "$f" ] || continue
   remote "nemoclaw ${SANDBOX_NAME} upload ${f} ${OPENWEBUI_DIR}/" \
     || log_warn "Upload of ${f} failed (continuing)"
 done
@@ -82,6 +86,13 @@ else
   # sh -c wraps the shell builtin `cd` (nemoclaw exec cannot run builtins directly)
   sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install.sh && ./install.sh'" \
     || die "Open WebUI install failed"
+fi
+
+# Overlay company name/logo onto Open WebUI static assets (after pip so files exist).
+if [ -f "${OPENWEBUI_BRAND_SH:-}" ]; then
+  log_info "Applying Johnson Electric branding to Open WebUI..."
+  sandbox_exec "sh -c 'chmod +x ${OPENWEBUI_DIR}/apply-webui-branding.sh && ${OPENWEBUI_DIR}/apply-webui-branding.sh'" \
+    || log_warn "Branding overlay failed (UI will keep default Open WebUI assets)"
 fi
 
 # ---- 3. Place the clean DB ----
