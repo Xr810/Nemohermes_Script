@@ -70,7 +70,7 @@ inside the sandbox and the onboard probe will fail.
 |---|---|---|
 | 1 | `01-infra.sh` | Preflight (DNS, docker group, inference config); `apt-get install git curl binutils zstd lsof`; run the NVIDIA installer when components are missing; `nemoclaw onboard` until the sandbox is Ready |
 | 2 | `02-hermes.sh` | Set `approvals.mode`, sync the Hermes config-hash anchor, restart the container to confirm no drift (rolls back on failure) |
-| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5 + patches); overlay the branding assets; install a blank database; write systemd units; enable and start Open WebUI and the port-forward; wait for the admin account, then import the filter |
+| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5 + patches); overlay the branding assets; install a blank database; write five systemd units (Open WebUI, its forward, and the Hermes dashboard plus API forwards) and start them; wait for the admin account, then import the filter |
 | 4 | `04-mcp.sh` | `nemoclaw <sandbox> mcp add mcp-router`, then probe credentials and tool discovery. Skipped when the MCP URL is empty |
 | 5 | `05-verify.sh` | Read-only checks; exits non-zero if anything failed |
 
@@ -157,8 +157,8 @@ Step 5 checks, without changing anything:
 - Open WebUI systemd user units are enabled (so they return after a host reboot)
 - Open WebUI serves static assets over the forwarded port (HTTP 200)
 - an admin exists and the filter is active and global
-- the three Open WebUI patches are present (new-chat `chat_id`, embedding
-  bypass, uvicorn keep-alive)
+- the two Open WebUI source patches are present (new-chat `chat_id`, uvicorn
+  keep-alive) and `start.sh` sets the embedding bypass
 - MCP tool discovery, when an MCP URL is configured
 
 Re-run it any time with `./deploy.sh 05`. Branding is not checked, since it
@@ -166,8 +166,10 @@ never blocks the deployment — confirm it by looking at the page.
 
 ## Access points
 
-Onboard publishes these on the deployment host, all bound to loopback. Open
-WebUI is the chat interface; the others are operator surfaces.
+All of these are bound to loopback on the deployment host. Step 3 owns the
+three forwarded ports as systemd units, because onboard's own forwards die
+with the gateway. Open WebUI is the chat interface; the others are operator
+surfaces.
 
 | Interface | Address |
 |---|---|
@@ -222,7 +224,7 @@ reinstall from scratch.
 | `WEBUI_LOCAL_PORT` | `3000` | Host port for the forward; empty disables it |
 | `SANDBOX_WAIT_SECS` | `120` | How long to wait for the sandbox to be Ready |
 | `ADMIN_WAIT_SECS` | `600` | How long to wait for the browser admin |
-| `FORWARD_PORTS` | `8642 …` | Reserved; onboard already publishes these and no step reads the value |
+| `FORWARD_PORTS` | `8642 …` | Reserved; no step reads it — step 3 hardcodes the ports it forwards |
 | `DOCKERFILE` | `resources/Dockerfile` | Reserved; the sandbox image comes from the installer |
 
 The remaining `OPENWEBUI_*` variables are paths into `resources/`. They exist so
@@ -240,8 +242,8 @@ Environment variables the scripts honour:
 
 | Variable | Effect |
 |---|---|
-| `INFERENCE_API_KEY` | Pre-fills / skips wizard item 3; also loaded from `secrets.env` |
-| `MCP_ROUTER_TOKEN` | Pre-fills / skips wizard item 5; also loaded from `secrets.env` |
+| `INFERENCE_API_KEY` | Pre-fills wizard item 3, which still prompts; also loaded from `secrets.env` |
+| `MCP_ROUTER_TOKEN` | Pre-fills wizard item 5, which still prompts; also loaded from `secrets.env` |
 | `REMOTE_HOST` | Run every command over SSH against that host instead of locally |
 | `UNIT_DIR` | Override the systemd user unit directory |
 | `LIBEXEC_DIR` | Override the helper script directory |

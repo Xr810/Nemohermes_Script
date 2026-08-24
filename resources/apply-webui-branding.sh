@@ -1,5 +1,7 @@
 #!/bin/sh
-# Overlay Johnson Electric assets onto Open WebUI 0.9.5 static files.
+# Overlay Johnson Electric assets onto Open WebUI 0.9.5 static files: the icon
+# goes onto favicons and avatars, the logo onto the splash screens.
+# `logo.png` is listed in both sets and the icon deliberately wins.
 # Idempotent. Safe to re-run after pip install.
 set -eu
 

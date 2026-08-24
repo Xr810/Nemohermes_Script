@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Render an authorized ephemeral Open WebUI PDF into images for Hermes vision.
+"""Render an authorized Open WebUI PDF into images for Hermes vision.
 
 Hermes reads supported source files directly. This adapter exists only because
 Hermes 0.19.0 treats PDF as binary and its vision tool accepts images, not PDF.
+
+The filter always calls `--source-path`, against an ephemeral handoff copy under
+/tmp. `--file-id` reads a still-persistent WebUI upload and caches the rendered
+pages under source-cache/; nothing in the deployment uses it, it is there for
+manual inspection of a file the filter has not diverted.
 """
 
 from __future__ import annotations

@@ -20,7 +20,8 @@ check_inference_dns() {
   local host ip
   host="$(printf '%s' "${INFERENCE_BASE_URL}" | sed -E 's#^[a-z][a-z0-9+.-]*://([^/:]+).*#\1#')"
   [ -n "${host}" ] || return 0
-  # Literal IP (e.g. 192.168.x / 10.x): skip DNS; NemoClaw trusts RFC1918.
+  # Any literal IPv4 skips the DNS check; a LAN one (192.168.x / 10.x) is also
+  # trusted by NemoClaw's SSRF guard.
   case "${host}" in
     [0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;;
   esac
@@ -86,7 +87,7 @@ command -v openshell-sandbox >/dev/null 2>&1 || need_install=1
 command -v nemoclaw >/dev/null 2>&1 || need_install=1
 
 # ---- Pre-install prerequisites required by the official installer ----
-# The NemoClaw installer needs git/curl/binutils(strings)/zstd on a fresh VM.
+# The NemoClaw installer needs git/curl/binutils(strings)/zstd/lsof on a fresh VM.
 if [ "$need_install" = "1" ]; then
   log_info "Installing prerequisites (git curl binutils zstd lsof)..."
   sudo apt-get update -qq

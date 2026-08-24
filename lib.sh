@@ -68,8 +68,8 @@ save_secrets() {
 }
 
 # ---- Interactive config wizard ----
-# Enter keeps the current config.env value; required items never silently
-# default.
+# Enter keeps the current value — from config.env, or from secrets.env for the
+# two credential prompts. Required items never silently default.
 prompt_config() {
   local env_file
   env_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.env"
@@ -206,7 +206,11 @@ prompt_config() {
     log_ok "Config saved to config.env"
   fi
   save_secrets
-  log_ok "API key and MCP token saved to secrets.env (gitignored; reused after reboot)"
+  if [ -n "${MCP_ROUTER_TOKEN:-}" ]; then
+    log_ok "API key and MCP token saved to secrets.env (gitignored; reused after reboot)"
+  else
+    log_ok "API key saved to secrets.env (gitignored; reused after reboot)"
+  fi
 
   echo
   log_info "Confirmed: sandbox=${SANDBOX_NAME}  inference=${INFERENCE_BASE_URL}  model=${INFERENCE_MODEL}  approvals=${APPROVALS_MODE}"

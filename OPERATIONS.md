@@ -1,8 +1,8 @@
 # Operations Guide
 
-Day-two operations for a deployment created by [`deploy.sh`](README.md):
-changing the model or provider, managing MCP servers, restarting Open WebUI, and
-reading logs.
+Day-two operations for a deployment created by `./deploy.sh` (installation is
+covered in the [README](README.md)): changing the model or provider, managing
+MCP servers, restarting Open WebUI, and reading logs.
 
 **The OpenShell gateway is the source of truth.** Hermes inside the sandbox only
 executes what the gateway hands it. Change configuration through
@@ -62,10 +62,11 @@ TUI. Hermes ships a browser dashboard of its own, separate from Open WebUI.
 | OpenShell TUI | `openshell term` | Sandboxes, providers, live egress and network approvals |
 | Hermes TUI | `nemoclaw <sandbox> exec -- hermes dashboard --tui` | The dashboard without a browser |
 
-Onboard publishes `18789` and `8642` on the host; this repo does not configure
-them, and `FORWARD_PORTS` in `config.env` is unused. Inside the sandbox the
-dashboard binds `19119` and the API binds `18642`, which are not reachable as
-host addresses.
+Onboard publishes `18789` and `8642` on the host, but those forwards die with the
+gateway, so step 3 recreates all three host ports as systemd user units instead
+(see [Service management](#service-management)). Inside the sandbox the dashboard
+binds `9119` and the API binds `18642`, which are not reachable as host
+addresses. `FORWARD_PORTS` in `config.env` is unused.
 
 ```bash
 openshell -g nemoclaw forward list   # confirm 3000 / 8642 / 18789
@@ -76,14 +77,26 @@ another machine, forward ports `3000` and `18789` over SSH.
 
 ## Service management
 
-Two user units are created by step 3. The step runs
-`systemctl --user enable --now` and enables lingering, so they come back after a
-host reboot once the gateway is up.
+Step 3 creates five user units and enables lingering, so they all come back after
+a host reboot once the gateway is up.
+
+| Unit | Role |
+|---|---|
+| `je-open-webui.service` | Open WebUI in the sandbox, via `start.sh` |
+| `je-open-webui-forward.service` | Host `3000` → Open WebUI; skipped when `WEBUI_LOCAL_PORT` is empty |
+| `je-hermes-dashboard.service` | `hermes dashboard` on sandbox port `9119` |
+| `je-hermes-dashboard-forward.service` | Host `18789` → the dashboard |
+| `je-hermes-api-forward.service` | Host `8642` → the Hermes API on `18642` |
+
+The two Open WebUI units are enabled and then *restarted*, not started with
+`enable --now`, so that re-running step 3 actually picks up the blank database it
+just placed; the three Hermes units use `enable --now`.
 
 ```bash
 systemctl --user status  je-open-webui.service
 systemctl --user restart je-open-webui.service
 systemctl --user restart je-open-webui-forward.service   # only the local port forward
+systemctl --user restart je-hermes-dashboard.service je-hermes-dashboard-forward.service
 journalctl --user -u je-open-webui -n 50 --no-pager
 ```
 

@@ -28,10 +28,12 @@ log_step "Step 3/5: Open WebUI deployment"
 
 wait_sandbox_ready || exit 1
 
-# Open WebUI binds 127.0.0.1:${WEBUI_PORT} inside the sandbox. The host
-# reaches it via the forward unit; the filter installer uses sandbox loopback.
-# `enable --now` will not restart an already-running unit, so a just-replaced
-# database can sit under a process that is still coming up or already dead.
+# Open WebUI listens on sandbox loopback; the host reaches it through the forward
+# unit, while the filter installer stays on loopback. Probe HTTP rather than
+# trusting systemd: an "active" unit may still be binding, or already dead after
+# the database underneath it was replaced.
+# The port is hardcoded in resources/start.sh — see the WEBUI_PORT note in
+# config.env before changing it here.
 wait_webui_listen() {
   local secs="${1:-90}" waited=0
   local port="${WEBUI_PORT:-3000}"
@@ -73,7 +75,9 @@ done
 # install.sh needs GitHub (uv/Python) and PyPI. Built-in github preset only
 # allows git, so add resources/openwebui-install-policy.yaml plus pypi.
 # If policy add hits endpoint ambiguity (tls mismatch with brew etc.),
-# patch that host to tls: skip and retry once.
+# patch that host to tls: skip and retry once. A failure is deliberately
+# repeated with output captured, because only the error text names the
+# conflicting host.
 apply_openwebui_policy() {
   local out host
   if remote "nemoclaw ${SANDBOX_NAME} policy add --from-file ${POLICY_FILE} --yes" >/dev/null 2>&1; then
@@ -148,12 +152,17 @@ sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/functions && cp ${OPENWEBUI_DIR}/
   || log_warn "Failed to place filter source (can be placed manually later)"
 
 # ---- 5. systemd units ----
-log_info "Creating systemd units (Open WebUI + forward + cleanup)..."
+# Five units plus the cleanup helper: Open WebUI, its port forward, the Hermes
+# dashboard, and forwards for the dashboard and the Hermes API.
+log_info "Creating systemd units (Open WebUI + forwards + Hermes + cleanup)..."
 UNIT_DIR="${UNIT_DIR:-$HOME/.config/systemd/user}"
 LIBEXEC_DIR="${LIBEXEC_DIR:-$HOME/.local/libexec}"
 mkdir -p "$UNIT_DIR" "$LIBEXEC_DIR"
 
-# cleanup script
+# ---- 5a. Cleanup helper ----
+# Unquoted heredoc: $(command -v openshell), ${SANDBOX_NAME} and ${WEBUI_PORT}
+# are baked in now, on the host; every \$ is escaped so it survives into the
+# generated script and is expanded when systemd runs it.
 cat > "$LIBEXEC_DIR/je-open-webui-cleanup" <<EOF
 #!/bin/sh
 set -eu
@@ -178,7 +187,7 @@ exit 1
 EOF
 chmod +x "$LIBEXEC_DIR/je-open-webui-cleanup"
 
-# main unit
+# ---- 5b. Open WebUI unit ----
 cat > "$UNIT_DIR/je-open-webui.service" <<EOF
 [Unit]
 Description=Open WebUI inside the OpenShell sandbox
@@ -200,7 +209,7 @@ TimeoutStopSec=20
 WantedBy=default.target
 EOF
 
-# forward unit (optional)
+# ---- 5c. Open WebUI forward unit (skipped when WEBUI_LOCAL_PORT is empty) ----
 if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
   cat > "$UNIT_DIR/je-open-webui-forward.service" <<EOF
 [Unit]
@@ -221,6 +230,7 @@ WantedBy=default.target
 EOF
 fi
 
+# ---- 5d. Break the gateway ordering cycle ----
 # NVIDIA's gateway unit has After=default.target AND WantedBy=default.target.
 # Requiring it from another WantedBy=default.target unit (Open WebUI / forwards)
 # forms an ordering cycle; systemd then deletes the WebUI start job on boot.
@@ -236,8 +246,10 @@ cat > "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d/no-after-default.conf" <
 # Intentionally empty: After=default.target is removed from the unit file above.
 EOF
 
-# Hermes dashboard + API: onboard publishes these, but those forwards die with
-# the gateway and are not systemd units. Recreate them so they return on reboot.
+# ---- 5e. Hermes dashboard + API units ----
+# Onboard publishes these, but those forwards die with the gateway and are not
+# systemd units. Recreate them so they return on reboot. The dashboard runs on
+# sandbox port 9119 and the Hermes API on 18642.
 OPENSHELL_BIN="$(command -v openshell)"
 cat > "$UNIT_DIR/je-hermes-dashboard.service" <<EOF
 [Unit]
@@ -303,9 +315,10 @@ if [ "$(loginctl show-user "${USER}" -p Linger --value 2>/dev/null || true)" != 
 fi
 
 # ---- 6. Enable and start ----
-# enable writes the default.target.wants symlink so both units come back after
-# a host reboot. restart (not enable --now) is required so a re-run actually
-# picks up the blank database just placed above.
+# enable writes the default.target.wants symlink so the units come back after a
+# host reboot. The Open WebUI pair then needs an explicit restart rather than
+# enable --now, so a re-run actually picks up the blank database placed above;
+# the Hermes units carry no such state and use enable --now.
 log_info "Enabling and restarting Open WebUI..."
 # start.sh needs exec permission (uploaded files default to 644)
 sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \

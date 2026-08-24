@@ -115,6 +115,9 @@ def main() -> int:
         status, result = request_json("POST", f"/id/{FUNCTION_ID}/update", token, form)
         action = "updated"
     elif status == 401:
+        # Open WebUI answers an unknown function id with 401 + NOT_FOUND, not
+        # 404, so this branch means "does not exist yet" rather than a bad
+        # token — the JWT was minted a few lines above from the WebUI secret.
         status, result = request_json("POST", "/create", token, form)
         action = "created"
     else:
