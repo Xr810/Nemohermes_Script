@@ -223,12 +223,17 @@ fi
 
 # NVIDIA's gateway unit has After=default.target AND WantedBy=default.target.
 # Requiring it from another WantedBy=default.target unit (Open WebUI / forwards)
-# forms an ordering cycle; systemd then deletes the gateway start job on boot
-# and nothing that needs the sandbox comes back.
+# forms an ordering cycle; systemd then deletes the WebUI start job on boot.
+# An empty After= drop-in does not clear that line on systemd 255, so strip it
+# from the unit file itself. Re-run this step after a gateway upgrade.
+GATEWAY_UNIT="${UNIT_DIR}/nemoclaw-openshell-gateway.service"
+if [ -f "$GATEWAY_UNIT" ]; then
+  sed -i '/^After=default\.target$/d' "$GATEWAY_UNIT"
+fi
 mkdir -p "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d"
 cat > "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d/no-after-default.conf" <<'EOF'
 [Unit]
-After=
+# Intentionally empty: After=default.target is removed from the unit file above.
 EOF
 
 # Hermes dashboard + API: onboard publishes these, but those forwards die with

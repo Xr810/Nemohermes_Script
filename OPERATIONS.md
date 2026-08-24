@@ -294,6 +294,7 @@ A container in `restarting` state almost always means config drift.
 | Sandbox container restarts in a loop | Config drift. Re-run `./deploy.sh 02`, and check `nemoclaw <sandbox> logs --tail 50` |
 | Edited Hermes config by hand | Re-run `./deploy.sh 02` (or `openshell inference set`) to restore a consistent, anchored state |
 | Open WebUI unreachable, service active | Restart `je-open-webui-forward.service`; from a remote machine use an SSH tunnel |
+| Open WebUI unit is `inactive` after reboot, journal says `ordering cycle` | NVIDIA's gateway unit had `After=default.target`. Re-run `./deploy.sh 03` (it strips that line) or `systemctl --user start je-open-webui.service je-open-webui-forward.service` |
 | Uploads come back chunked | The filter is missing or disabled; reinstall it and confirm it is active and global |
 | Filter edits have no effect | The filter runs from the WebUI database; re-run the installer after editing the `.py` |
 | PDFs are not read, other files are | Check `/sandbox/open-webui/hermes_source_tool.py` exists and `pypdfium2` is in the venv |
