@@ -1,4 +1,8 @@
 #!/bin/sh
+# Launch Open WebUI inside the sandbox; the ExecStart of je-open-webui.service.
+# Reads the Hermes API host/port/key from /sandbox/.hermes/.env and points Open
+# WebUI at it, then execs the server with a scrubbed environment (env -i), so
+# nothing the service manager exports can leak in. WEBUI_NAME sets the UI name.
 set -eu
 
 OPEN_WEBUI_ROOT=/sandbox/open-webui

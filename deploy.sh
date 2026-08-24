@@ -37,8 +37,9 @@ done
 
 # ---- Pre-checks ----
 require_cmd bash ssh
-# Empty REMOTE_HOST = run locally on the target machine (recommended, just run ./deploy.sh)
-# Only needed when deploying remotely from another machine (ssh alias or user@host)
+# Empty REMOTE_HOST = run locally on the target machine (recommended: just run
+# ./deploy.sh). Set it to an ssh alias or user@host only when deploying
+# remotely from another machine.
 if [ -n "${REMOTE_HOST:-}" ]; then
   log_info "Remote deploy mode: ${REMOTE_HOST}"
 else

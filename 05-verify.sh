@@ -44,7 +44,7 @@ else
   log_info "approvals.mode = ${AMODE:-unknown} (no change requested)"
 fi
 
-# 5. Open WebUI units enabled (survive host reboot; WantedBy alone is not enough)
+# 5. Open WebUI units enabled (survive reboot; WantedBy alone is not enough)
 WEBUI_ENABLED="$(systemctl --user is-enabled je-open-webui.service 2>/dev/null || true)"
 check "je-open-webui enabled" "$( [ "$WEBUI_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
 if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
@@ -52,7 +52,8 @@ if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
   check "je-open-webui-forward enabled" "$( [ "$FWD_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
 fi
 
-# 6. Open WebUI static assets (via forward or direct probe)
+# 6. Open WebUI static assets over the forwarded host port. Exercises the whole
+# chain: forward unit -> gateway -> Open WebUI in the sandbox.
 WEBUI_URL="http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
 LOADER_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "${WEBUI_URL}/static/loader.js" 2>/dev/null || echo 000)"
 check "Open WebUI static assets (${LOADER_CODE})" "$( [ "$LOADER_CODE" = "200" ] && echo 1 || echo 0 )"
@@ -80,7 +81,7 @@ check "filter active+global" "$( [ "${FILTER_BOOL}" = "True" ] || [ "${FILTER_BO
 SOCKET_PATCH="$(sandbox_exec "grep -c \"(request_info.get('chat_id') or '').startswith('channel:')\" /sandbox/open-webui/.venv/lib/python3.11/site-packages/open_webui/socket/main.py 2>/dev/null" || echo 0)"
 check "socket/main.py chat_id=None patch" "$SOCKET_PATCH"
 
-# 10. BYPASS_EMBEDDING_AND_RETRIEVAL enabled in start.sh (uploads reach Hermes whole)
+# 10. BYPASS_EMBEDDING_AND_RETRIEVAL in start.sh (uploads reach Hermes whole)
 BYPASS_SET="$(sandbox_exec "grep -c 'BYPASS_EMBEDDING_AND_RETRIEVAL=True' /sandbox/open-webui/start.sh 2>/dev/null" || echo 0)"
 check "start.sh BYPASS_EMBEDDING_AND_RETRIEVAL=True" "$BYPASS_SET"
 

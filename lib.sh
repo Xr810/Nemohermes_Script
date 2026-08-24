@@ -68,7 +68,8 @@ save_secrets() {
 }
 
 # ---- Interactive config wizard ----
-# Enter keeps the current config.env value; required items never silently default.
+# Enter keeps the current config.env value; required items never silently
+# default.
 prompt_config() {
   local env_file
   env_file="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.env"
@@ -108,7 +109,7 @@ prompt_config() {
     log_warn "Model name is required (onboard configures it). Type the model id of your endpoint"
   done
 
-  # 3. API key — always prompt; Enter keeps secrets.env value, typing replaces it
+  # 3. API key — always prompt; Enter keeps secrets.env, typing replaces it
   echo -e "${C_YELLOW}3) Inference API key (visible input; Enter = keep saved value)${C_RESET}"
   if [ -n "${INFERENCE_API_KEY:-}" ]; then
     echo -e "   current: (secrets.env, $(printf '%s' "$INFERENCE_API_KEY" | cut -c1-4)...) — Enter keeps it"
@@ -289,7 +290,8 @@ sync_config_hash() {
   log_ok "config hash anchor synced (config.yaml → ${new_hash:0:12}...)"
 }
 
-# Restart the container and confirm no drift. Usage: restart_sandbox_verify <container-id>
+# Restart the container and confirm no drift.
+# Usage: restart_sandbox_verify <container-id>
 restart_sandbox_verify() {
   local cid="$1"
   log_info "Restarting sandbox container to verify no drift..."
@@ -304,7 +306,8 @@ restart_sandbox_verify() {
   return 0
 }
 
-# Matched by label, not name: real names look like openshell-default--<sandbox>-<uuid>
+# Matched by label, not name: real names look like
+# openshell-default--<sandbox>-<uuid>
 sandbox_container_id() {
   remote "docker ps -a --filter 'label=openshell.ai/sandbox-name=${SANDBOX_NAME}' --format '{{.ID}}' | head -1"
 }

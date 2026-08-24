@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Create/update and enable the local Hermes source-file Open WebUI filter."""
+"""Create/update and enable the local Hermes source-file Open WebUI filter.
+
+Runs inside the sandbox, against the loopback Open WebUI API. Authenticates by
+minting a short-lived admin JWT from the WebUI secret key, so it needs no
+password. Safe to re-run: an existing function is updated in place.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import time
 import urllib.error
@@ -13,6 +19,18 @@ import uuid
 from pathlib import Path
 
 import jwt
+
+# `nemoclaw exec` inherits the host's proxy variables, but Open WebUI listens on
+# loopback inside this network namespace, so a proxied request never reaches it.
+for _proxy_key in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+):
+    os.environ.pop(_proxy_key, None)
 
 
 ROOT = Path("/sandbox/open-webui")
@@ -34,17 +52,27 @@ def request_json(method: str, path: str, token: str, payload: dict | None = None
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            raw = response.read().decode("utf-8")
-            return response.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as error:
-        raw = error.read().decode("utf-8", errors="replace")
+    # Step 3 starts Open WebUI and imports the filter back to back, so uvicorn
+    # may still be binding when the first request goes out. Retry URLError
+    # (connection refused) for ~20s; HTTP errors are answers, so return at once.
+    last_error: Exception | None = None
+    for attempt in range(1, 11):
         try:
-            detail = json.loads(raw)
-        except json.JSONDecodeError:
-            detail = {"detail": raw}
-        return error.code, detail
+            with urllib.request.urlopen(request, timeout=20) as response:
+                raw = response.read().decode("utf-8")
+                return response.status, json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(raw)
+            except json.JSONDecodeError:
+                detail = {"detail": raw}
+            return error.code, detail
+        except urllib.error.URLError as error:
+            last_error = error
+            if attempt < 10:
+                time.sleep(2)
+    raise last_error if last_error is not None else RuntimeError("request failed")
 
 
 def admin_id() -> str:

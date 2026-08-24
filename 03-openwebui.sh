@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================
-# 03-openwebui — Open WebUI install, systemd units, and filter import
+# 03-openwebui — Open WebUI install, branding, systemd units, and filter import
 #
 # Usage: ./03-openwebui.sh
 #
 # Installs a blank database (resources/open-webui-fresh.db), so the first visit
 # shows the "create admin" screen; step 3.5 polls for that account and then
 # imports the filter. Re-running this step discards existing WebUI users.
+#
+# Branding (company icon/logo overlay) runs after pip so the static assets it
+# overwrites already exist; it is best-effort and never fails the step.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +27,32 @@ log_step "Step 3/5: Open WebUI deployment"
 [ -f "$OPENWEBUI_FILTER_INSTALLER" ] || die "Missing filter installer: $OPENWEBUI_FILTER_INSTALLER"
 
 wait_sandbox_ready || exit 1
+
+# Open WebUI binds 127.0.0.1:${WEBUI_PORT} inside the sandbox. The host
+# reaches it via the forward unit; the filter installer uses sandbox loopback.
+# `enable --now` will not restart an already-running unit, so a just-replaced
+# database can sit under a process that is still coming up or already dead.
+wait_webui_listen() {
+  local secs="${1:-90}" waited=0
+  local port="${WEBUI_PORT:-3000}"
+  log_info "Waiting for Open WebUI HTTP on 127.0.0.1:${port} (max ${secs}s)..."
+  while [ "$waited" -lt "$secs" ]; do
+    if sandbox_exec "python3 -c \"
+import os, urllib.request
+for k in ('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROXY','all_proxy'):
+    os.environ.pop(k, None)
+urllib.request.urlopen('http://127.0.0.1:${port}/static/loader.js', timeout=3)
+print('200')
+\"" 2>/dev/null | grep -q '200'; then
+      log_ok "Open WebUI is listening"
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  log_err "Open WebUI did not listen within ${secs}s"
+  return 1
+}
 
 # ---- 1. Upload Open WebUI files to the sandbox ----
 # Sandbox cannot see host files; upload with nemoclaw first.
@@ -83,12 +112,14 @@ log_info "Running install.sh (create venv, install Open WebUI 0.9.5 + pypdfium2)
 if sandbox_exec "test -x ${OPENWEBUI_DIR}/.venv/bin/open-webui" 2>/dev/null; then
   log_ok "Open WebUI already installed, skipping install"
 else
-  # sh -c wraps the shell builtin `cd` (nemoclaw exec cannot run builtins directly)
+  # sh -c wraps the shell builtin `cd`; nemoclaw exec cannot run builtins
   sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install.sh && ./install.sh'" \
     || die "Open WebUI install failed"
 fi
 
-# Overlay company name/logo onto Open WebUI static assets (after pip so files exist).
+# Overlay the company icon/logo onto Open WebUI's static assets (favicons,
+# splash, avatars). The displayed product name is separate — it comes from
+# WEBUI_NAME in resources/start.sh.
 if [ -f "${OPENWEBUI_BRAND_SH:-}" ]; then
   log_info "Applying Johnson Electric branding to Open WebUI..."
   sandbox_exec "sh -c 'chmod +x ${OPENWEBUI_DIR}/apply-webui-branding.sh && ${OPENWEBUI_DIR}/apply-webui-branding.sh'" \
@@ -97,7 +128,7 @@ fi
 
 # ---- 3. Place the clean DB ----
 # Upload into the directory (trailing slash). A dest named *.db is treated as a
-# folder by nemoclaw upload, so the file would land at *.db/*.db and cp would fail.
+# folder by nemoclaw upload, so the file would land at *.db/*.db and cp fails.
 log_info "Placing clean database (first visit = create admin)..."
 sandbox_exec "rm -rf ${OPENWEBUI_DIR}/open-webui-fresh.db" \
   || log_warn "Could not remove leftover ${OPENWEBUI_DIR}/open-webui-fresh.db"
@@ -105,7 +136,9 @@ remote "nemoclaw ${SANDBOX_NAME} upload ${OPENWEBUI_FRESH_DB} ${OPENWEBUI_DIR}/"
   || die "Failed to upload clean DB"
 # sh -c keeps the whole && chain inside the sandbox (eval would split it and run
 # the tail commands on the host)
-sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/data && cp ${OPENWEBUI_DIR}/open-webui-fresh.db ${OPENWEBUI_DIR}/data/webui.db && rm -f ${OPENWEBUI_DIR}/open-webui-fresh.db'" \
+# Drop leftover WAL/SHM first: otherwise SQLite can merge the blank file with
+# the previous admin row and step 3.5 thinks an admin exists before WebUI is up.
+sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/data && rm -f ${OPENWEBUI_DIR}/data/webui.db-wal ${OPENWEBUI_DIR}/data/webui.db-shm && cp ${OPENWEBUI_DIR}/open-webui-fresh.db ${OPENWEBUI_DIR}/data/webui.db && rm -f ${OPENWEBUI_DIR}/open-webui-fresh.db'" \
   || die "Failed to place webui.db"
 log_ok "Clean DB in place"
 
@@ -188,10 +221,76 @@ WantedBy=default.target
 EOF
 fi
 
+# NVIDIA's gateway unit has After=default.target AND WantedBy=default.target.
+# Requiring it from another WantedBy=default.target unit (Open WebUI / forwards)
+# forms an ordering cycle; systemd then deletes the gateway start job on boot
+# and nothing that needs the sandbox comes back.
+mkdir -p "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d"
+cat > "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d/no-after-default.conf" <<'EOF'
+[Unit]
+After=
+EOF
+
+# Hermes dashboard + API: onboard publishes these, but those forwards die with
+# the gateway and are not systemd units. Recreate them so they return on reboot.
+OPENSHELL_BIN="$(command -v openshell)"
+cat > "$UNIT_DIR/je-hermes-dashboard.service" <<EOF
+[Unit]
+Description=Hermes dashboard inside the OpenShell sandbox
+After=nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${OPENSHELL_BIN} -g nemoclaw sandbox exec -n ${SANDBOX_NAME} --no-tty -- hermes dashboard --no-open --port 9119 --skip-build
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+cat > "$UNIT_DIR/je-hermes-dashboard-forward.service" <<EOF
+[Unit]
+Description=Forward Hermes dashboard to localhost:18789
+After=je-hermes-dashboard.service nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${OPENSHELL_BIN} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 9119 --local 127.0.0.1:18789
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+cat > "$UNIT_DIR/je-hermes-api-forward.service" <<EOF
+[Unit]
+Description=Forward Hermes API to localhost:8642
+After=nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${OPENSHELL_BIN} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 18642 --local 127.0.0.1:8642
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
 systemctl --user daemon-reload
 
 # User systemd only starts at boot when lingering is on; otherwise units wait
-# for a login session. enable --now without linger still helps after SSH/orb login.
+# for a login session. enable --now without linger still helps after an
+# SSH/orb login.
 if [ "$(loginctl show-user "${USER}" -p Linger --value 2>/dev/null || true)" != "yes" ]; then
   loginctl enable-linger "${USER}" 2>/dev/null \
     || sudo loginctl enable-linger "${USER}" \
@@ -200,25 +299,42 @@ fi
 
 # ---- 6. Enable and start ----
 # enable writes the default.target.wants symlink so both units come back after
-# a host reboot. --now also starts them for this deploy.
-log_info "Enabling and starting Open WebUI..."
+# a host reboot. restart (not enable --now) is required so a re-run actually
+# picks up the blank database just placed above.
+log_info "Enabling and restarting Open WebUI..."
 # start.sh needs exec permission (uploaded files default to 644)
 sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \
   || log_warn "chmod +x start.sh failed"
 # Clear any failed state from earlier runs before starting
 systemctl --user reset-failed je-open-webui.service 2>/dev/null || true
-systemctl --user enable --now je-open-webui.service || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
-sleep 5
+systemctl --user enable je-open-webui.service \
+  || log_warn "enable je-open-webui failed (continuing with restart)"
+systemctl --user restart je-open-webui.service \
+  || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
 if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
-  systemctl --user enable --now je-open-webui-forward.service || log_warn "forward start failed (can retry later)"
+  systemctl --user reset-failed je-open-webui-forward.service 2>/dev/null || true
+  systemctl --user enable je-open-webui-forward.service \
+    || log_warn "enable je-open-webui-forward failed (continuing with restart)"
+  systemctl --user restart je-open-webui-forward.service \
+    || log_warn "forward start failed (can retry later)"
 fi
+wait_webui_listen 90 \
+  || { journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
+systemctl --user reset-failed je-hermes-dashboard.service je-hermes-dashboard-forward.service je-hermes-api-forward.service 2>/dev/null || true
+systemctl --user enable --now je-hermes-dashboard.service \
+  || log_warn "Hermes dashboard start failed (can retry later)"
+systemctl --user enable --now je-hermes-dashboard-forward.service \
+  || log_warn "Hermes dashboard forward start failed (can retry later)"
+systemctl --user enable --now je-hermes-api-forward.service \
+  || log_warn "Hermes API forward start failed (can retry later)"
 
 # ---- 7. Wait for admin creation + import filter ----
 log_step "Step 3.5: Wait for admin creation and import filter"
 
 URL="http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
+WAIT_MIN=$((ADMIN_WAIT_SECS / 60))
 log_info "Open in your browser: ${URL}"
-log_info "First visit shows the 'create admin' page. The script continues automatically once created (up to ${ADMIN_WAIT_SECS}s)..."
+log_info "First visit shows the 'create admin' page. The script continues automatically once created (up to ${WAIT_MIN} min)..."
 
 waited=0
 while [ "$waited" -lt "${ADMIN_WAIT_SECS}" ]; do
@@ -240,13 +356,30 @@ if [ "$waited" -ge "${ADMIN_WAIT_SECS}" ]; then
   log_warn "Timed out waiting, no admin detected. You can run the filter install manually later:"
   log_warn "  After ./04-mcp.sh, run: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
 else
+  # Signup can race a restart; loopback is often still down at this exact moment.
+  wait_webui_listen 90 \
+    || { log_err "Open WebUI went away after admin creation; not importing filter"; exit 1; }
   log_info "Importing filter (hermes_source_files v1.3.3)..."
   # Must run under the Open WebUI venv python: the installer imports `jwt`,
   # which is NOT in the sandbox system python3 (3.13), but IS in the venv
   # (pyjwt is an open-webui dependency).
-  sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install-hermes-source-filter.py && ${OPENWEBUI_DIR}/.venv/bin/python install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py'" \
-    && log_ok "filter imported (active + global)" \
-    || log_warn "filter import failed, rerun the above command manually later"
+  FILTER_OK=0
+  attempt=1
+  while [ "$attempt" -le 10 ]; do
+    if sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install-hermes-source-filter.py && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy ${OPENWEBUI_DIR}/.venv/bin/python install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py'"; then
+      FILTER_OK=1
+      break
+    fi
+    log_warn "filter import attempt ${attempt}/10 failed, retrying in 3s..."
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  if [ "$FILTER_OK" = "1" ]; then
+    log_ok "filter imported (active + global)"
+  else
+    log_err "filter import failed after 10 attempts. Retry: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
+    exit 1
+  fi
 fi
 
 log_ok "Step 3 done. Next: ./04-mcp.sh"

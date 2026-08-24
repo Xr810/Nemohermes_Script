@@ -1,8 +1,8 @@
 # Operations Guide
 
-Day-two operations for a deployment created by [`deploy.sh`](README.md): changing
-the model or provider, managing MCP servers, restarting Open WebUI, and reading
-logs.
+Day-two operations for a deployment created by [`deploy.sh`](README.md):
+changing the model or provider, managing MCP servers, restarting Open WebUI, and
+reading logs.
 
 **The OpenShell gateway is the source of truth.** Hermes inside the sandbox only
 executes what the gateway hands it. Change configuration through
@@ -26,7 +26,7 @@ in first.
 
 ## Architecture
 
-```
+```text
 browser
   → 127.0.0.1:3000 on the host          (je-open-webui-forward.service)
     → Open WebUI in the sandbox          (je-open-webui.service → start.sh)
@@ -42,6 +42,8 @@ browser
 | MCP over local stdio | `hermes mcp …` inside the sandbox (the gateway has no local-process transport) |
 | Approval mode | `./deploy.sh 02` |
 | Open WebUI process | `systemctl --user … je-open-webui` |
+| Upload handling | The `hermes_source_files` filter; see [Upload handling](#upload-handling) |
+| Company name and artwork | `resources/start.sh` and the branding assets; see [Branding](#branding) |
 
 Open WebUI shows a single Hermes agent model. Its base URL points at the Hermes
 API server, not at your provider, so **switching models is a gateway change, not
@@ -74,8 +76,9 @@ another machine, forward ports `3000` and `18789` over SSH.
 
 ## Service management
 
-Two user units are created by step 3. The step runs `systemctl --user enable --now`
-and enables lingering, so they come back after a host reboot once the gateway is up.
+Two user units are created by step 3. The step runs
+`systemctl --user enable --now` and enables lingering, so they come back after a
+host reboot once the gateway is up.
 
 ```bash
 systemctl --user status  je-open-webui.service
@@ -178,8 +181,8 @@ nemoclaw <sandbox> exec -- hermes mcp remove <name>
 ```
 
 `hermes mcp` maintains its own state alongside the config anchor, so these
-commands are safe — unlike hand-editing `config.yaml`. New servers apply from the
-next agent request.
+commands are safe — unlike hand-editing `config.yaml`. New servers apply from
+the next agent request.
 
 ## Approval mode
 
@@ -202,11 +205,26 @@ Check the current value at any time:
 nemoclaw <sandbox> exec -- hermes config get approvals.mode
 ```
 
-## Reinstalling the Open WebUI filter
+## Upload handling
 
-The `hermes_source_files` filter passes chat uploads to Hermes as whole files
-instead of chunking them for retrieval. Step 3 imports it automatically once the
-admin account exists; if that timed out, run it manually:
+The `hermes_source_files` filter passes files attached directly to a chat to
+Hermes whole, through an ephemeral copy, instead of chunking them for retrieval.
+Knowledge collections are untouched and still go through RAG. Three files in
+`/sandbox/open-webui/` are involved:
+
+| File | Role |
+|---|---|
+| `functions/hermes_source_files.py` | The filter itself; registered in the WebUI database, not loaded from disk at runtime |
+| `hermes_source_tool.py` | Renders PDF pages to images, because Hermes treats PDF as binary |
+| `install-hermes-source-filter.py` | Registers/updates the filter and turns it active and global |
+
+Because the filter runs from the database, editing the `.py` file changes
+nothing until you re-run the installer.
+
+### Reinstalling the filter
+
+Step 3 imports it automatically once the admin account exists; if that timed
+out, or after editing the filter, run it manually:
 
 ```bash
 nemoclaw <sandbox> exec -- /sandbox/open-webui/.venv/bin/python \
@@ -217,12 +235,47 @@ nemoclaw <sandbox> exec -- /sandbox/open-webui/.venv/bin/python \
 It must run under the Open WebUI virtualenv: the installer imports `jwt`, which
 is a project dependency and is absent from the sandbox system Python.
 
+The installer talks to the WebUI API over loopback, so it drops any inherited
+`HTTP_PROXY`/`HTTPS_PROXY` and retries a refused connection for about 20 seconds
+while uvicorn finishes binding. A failure after that is real — check that the
+service is up before re-running.
+
+Tune behaviour (max files per request, ephemeral copy lifetime) from the
+filter's valves in the Open WebUI admin UI rather than by editing the source.
+
+## Branding
+
+Two independent things carry the company identity:
+
+| What | Source | Applied by |
+|---|---|---|
+| Product name shown in the UI | `WEBUI_NAME` in `resources/start.sh` | The service environment, read at start |
+| Favicon, splash, default avatars | `resources/company-icon.png`, `resources/company-logo.png` | `apply-webui-branding.sh`, which overwrites the matching PNGs under the installed `open_webui` package |
+
+To change the artwork, replace the PNGs in `resources/` and re-apply the overlay
+without reinstalling Open WebUI:
+
+```bash
+nemoclaw <sandbox> upload resources/company-icon.png /sandbox/open-webui/
+nemoclaw <sandbox> upload resources/company-logo.png /sandbox/open-webui/
+nemoclaw <sandbox> exec -- /sandbox/open-webui/apply-webui-branding.sh
+systemctl --user restart je-open-webui.service
+```
+
+To change the name, edit `WEBUI_NAME` in `resources/start.sh`, re-upload it, and
+restart the service. Hard-refresh the browser afterwards; the old favicon and
+splash are cached aggressively.
+
+A `pip install` or an Open WebUI upgrade restores the stock assets, so re-run
+the overlay after either. The script is idempotent and exits cleanly when the
+assets are absent.
+
 ## Diagnostics
 
 ```bash
 ./deploy.sh 05                                  # full verification, read-only
 openshell -g nemoclaw sandbox list              # sandbox state
-nemoclaw doctor                                 # gateway health
+nemoclaw <sandbox> doctor                       # sandbox and gateway health
 nemoclaw <sandbox> logs --tail 50               # sandbox / Hermes logs
 journalctl --user -u je-open-webui -n 50        # Open WebUI logs
 docker ps -a --filter 'label=openshell.ai/sandbox-name=<sandbox>'
@@ -242,6 +295,9 @@ A container in `restarting` state almost always means config drift.
 | Edited Hermes config by hand | Re-run `./deploy.sh 02` (or `openshell inference set`) to restore a consistent, anchored state |
 | Open WebUI unreachable, service active | Restart `je-open-webui-forward.service`; from a remote machine use an SSH tunnel |
 | Uploads come back chunked | The filter is missing or disabled; reinstall it and confirm it is active and global |
+| Filter edits have no effect | The filter runs from the WebUI database; re-run the installer after editing the `.py` |
+| PDFs are not read, other files are | Check `/sandbox/open-webui/hermes_source_tool.py` exists and `pypdfium2` is in the venv |
+| Stock Open WebUI artwork is back | A reinstall or upgrade overwrote it; re-run `apply-webui-branding.sh` and hard-refresh |
 
 ## Escape hatch
 

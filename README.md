@@ -13,14 +13,14 @@ WebUI, register MCP (optional), and verify the result.
 |---|---|
 | OS | Ubuntu 24.04 |
 | Privileges | `sudo` (used to install prerequisite packages) |
-| Commands | `bash`, `ssh`, `curl`, `git` (the rest is installed automatically) |
+| Commands | `bash` and `ssh`. Step 1 installs `git`, `curl`, `binutils`, `zstd`, `lsof` itself |
 | Network | `nvidia.com`, GitHub/GHCR, PyPI, and your inference endpoint |
 | Inference | OpenAI-compatible base URL + model name + API key |
 | MCP (optional) | Public HTTPS MCP Router URL + token |
 
 The inference endpoint must resolve over real DNS. A local proxy in fake-ip mode
-(Surge/Clash, `198.18.x.x`) makes the onboard probe fail; the scripts detect this
-and stop with an explanation.
+(Surge/Clash, `198.18.x.x`) makes the onboard probe fail; the scripts detect
+this and stop with an explanation.
 
 ## Quick start
 
@@ -70,7 +70,7 @@ inside the sandbox and the onboard probe will fail.
 |---|---|---|
 | 1 | `01-infra.sh` | Preflight (DNS, docker group, inference config); `apt-get install git curl binutils zstd lsof`; run the NVIDIA installer when components are missing; `nemoclaw onboard` until the sandbox is Ready |
 | 2 | `02-hermes.sh` | Set `approvals.mode`, sync the Hermes config-hash anchor, restart the container to confirm no drift (rolls back on failure) |
-| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5); install a blank database; write systemd units; enable and start Open WebUI and the port-forward; wait for the admin account, then import the filter |
+| 3 | `03-openwebui.sh` | Upload resources; add uv/PyPI network policies; run `install.sh` (Open WebUI 0.9.5 + patches); overlay the branding assets; install a blank database; write systemd units; enable and start Open WebUI and the port-forward; wait for the admin account, then import the filter |
 | 4 | `04-mcp.sh` | `nemoclaw <sandbox> mcp add mcp-router`, then probe credentials and tool discovery. Skipped when the MCP URL is empty |
 | 5 | `05-verify.sh` | Read-only checks; exits non-zero if anything failed |
 
@@ -116,30 +116,58 @@ screen. The script prints the URL and polls for the account:
 | OrbStack VM, browser on macOS | The printed address usually works (OrbStack maps the port) |
 | Remote server, browser elsewhere | `localhost` resolves to the browser's own machine, not the server. Use a tunnel: `ssh -L 127.0.0.1:3000:127.0.0.1:3000 user@server` |
 
-Once the admin exists, the script imports the `hermes_source_files` filter and
-enables it globally. The filter hands direct chat uploads to Hermes as whole
-files instead of chunking them into RAG. If no admin appears within
-`ADMIN_WAIT_SECS` (default 600), the deployment continues and prints the manual
-import command.
+Once the admin exists, the script imports the `hermes_source_files` filter
+(v1.3.3) and enables it globally. If no admin appears within `ADMIN_WAIT_SECS`
+(default 600), the deployment continues and prints the manual import command.
+
+## File uploads
+
+The filter changes what happens to a file you attach directly to a chat. Instead
+of being chunked and embedded for retrieval, it is copied to an ephemeral
+per-request directory and handed to Hermes whole, so the agent reads the real
+file. The copy and the Open WebUI upload record are removed afterwards.
+
+Knowledge collections are deliberately left alone and keep going through RAG —
+only direct chat uploads are diverted.
+
+Hermes reads text-like files itself and analyses images with its vision tool.
+PDFs are the exception: Hermes treats them as binary, so `hermes_source_tool.py`
+renders the pages to images first (this is why `install.sh` pulls in
+`pypdfium2`). All three files live in `/sandbox/open-webui/`.
+
+## Branding
+
+Step 3 applies Johnson Electric branding in two independent places:
+
+| What | Where it comes from | To change it |
+|---|---|---|
+| Product name in the UI | `WEBUI_NAME` in `resources/start.sh` | Edit `start.sh`, re-run step 3 |
+| Favicon, splash, avatars | `resources/company-icon.png` / `company-logo.png`, applied by `apply-webui-branding.sh` | Replace the PNGs, re-run step 3 |
+
+The overlay is best-effort: if the assets are missing or the copy fails, the
+deployment continues with stock Open WebUI artwork. It runs after `pip install`,
+because it overwrites files that the install creates, and it is idempotent.
 
 ## Verification
 
 Step 5 checks, without changing anything:
 
-- sandbox is Ready, `nemoclaw doctor` reports ok, Hermes reports a version
+- sandbox is Ready, `nemoclaw <sandbox> doctor` reports ok, Hermes has a version
 - `approvals.mode` matches the configured value (skipped if unset)
 - Open WebUI systemd user units are enabled (so they return after a host reboot)
 - Open WebUI serves static assets over the forwarded port (HTTP 200)
 - an admin exists and the filter is active and global
-- the three Open WebUI patches are present (new-chat `chat_id`, embedding bypass, uvicorn keep-alive)
+- the three Open WebUI patches are present (new-chat `chat_id`, embedding
+  bypass, uvicorn keep-alive)
 - MCP tool discovery, when an MCP URL is configured
 
-Re-run it any time with `./deploy.sh 05`.
+Re-run it any time with `./deploy.sh 05`. Branding is not checked, since it
+never blocks the deployment — confirm it by looking at the page.
 
 ## Access points
 
-Onboard publishes these on the deployment host, all bound to loopback. Open WebUI
-is the chat interface; the others are operator surfaces.
+Onboard publishes these on the deployment host, all bound to loopback. Open
+WebUI is the chat interface; the others are operator surfaces.
 
 | Interface | Address |
 |---|---|
@@ -194,8 +222,19 @@ reinstall from scratch.
 | `WEBUI_LOCAL_PORT` | `3000` | Host port for the forward; empty disables it |
 | `SANDBOX_WAIT_SECS` | `120` | How long to wait for the sandbox to be Ready |
 | `ADMIN_WAIT_SECS` | `600` | How long to wait for the browser admin |
-| `FORWARD_PORTS` | `8642 …` | Reserved; not used by the current steps |
-| `DOCKERFILE` | `resources/Dockerfile` | Reserved; the image comes from the installer |
+| `FORWARD_PORTS` | `8642 …` | Reserved; onboard already publishes these and no step reads the value |
+| `DOCKERFILE` | `resources/Dockerfile` | Reserved; the sandbox image comes from the installer |
+
+The remaining `OPENWEBUI_*` variables are paths into `resources/`. They exist so
+the folder stays relocatable, and are worth touching only to swap an asset:
+
+| Variable | Points at |
+|---|---|
+| `OPENWEBUI_FRESH_DB` | Blank database installed by step 3 |
+| `OPENWEBUI_INSTALL_SH` / `OPENWEBUI_START_SH` | In-sandbox install and launch scripts |
+| `OPENWEBUI_FILTER_SRC` / `OPENWEBUI_FILTER_INSTALLER` | Upload filter and its registration script |
+| `OPENWEBUI_PDF_TOOL` | PDF-to-image adapter used by the filter |
+| `OPENWEBUI_BRAND_ICON` / `OPENWEBUI_BRAND_LOGO` / `OPENWEBUI_BRAND_SH` | Branding assets and the overlay script; unset any of them to keep stock artwork |
 
 Environment variables the scripts honour:
 
@@ -219,12 +258,13 @@ supported path; remote mode exists for deploying from a second machine.
 | `resolves to fake-ip 198.18.x.x` | A local proxy is hijacking DNS. Disconnect it or exempt the domain |
 | `does not resolve` | Wrong endpoint hostname, or no network access to it |
 | `Missing required inference config` | URL, model, and API key must all be set |
-| `git: command not found` | `sudo apt-get install -y git`, then re-run |
+| `Failed to install prerequisites` | `apt-get` could not reach its mirrors; fix networking or install `git curl binutils zstd lsof` by hand, then re-run |
 | `docker daemon not usable` | Still failing after a reboot: `newgrp docker`, then re-run |
 | `Still missing after install` | `source ~/.bashrc` or `export PATH="$HOME/.local/bin:$PATH"`, then re-run |
 | Open WebUI install produces no output | It is downloading; expect up to an hour on a slow link |
 | Container stuck restarting after step 2 | Config drift. Step 2 rolls back automatically; check `nemoclaw <sandbox> logs --tail 50` |
 | Open WebUI will not start | `journalctl --user -u je-open-webui -n 40` |
+| UI still shows stock Open WebUI artwork | The branding overlay was skipped; see [OPERATIONS.md](OPERATIONS.md#branding) to re-apply it without reinstalling |
 | Verification reports failures | Fix the step it points at and re-run that step, then `./deploy.sh 05` |
 
 ## Repository layout
@@ -239,7 +279,8 @@ supported path; remote mode exists for deploying from a second machine.
 | `05-verify.sh` | End-to-end verification |
 | `lib.sh` | Shared logging, wizard, sandbox helpers |
 | `config.env` | Host configuration; no secrets |
-| `resources/` | Blank database, Open WebUI install/start scripts, filter, network policy, sandbox Dockerfile |
+| `secrets.env` | API key and MCP token; created by the wizard, gitignored, mode 600 |
+| `resources/` | Blank database, Open WebUI install/start scripts, upload filter and PDF adapter, branding assets, install network policy, reserved Dockerfile |
 
 Day-two operations — changing the model or provider, adding MCP servers,
 restarting services — are documented in [OPERATIONS.md](OPERATIONS.md).

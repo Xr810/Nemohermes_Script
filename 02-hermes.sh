@@ -4,9 +4,9 @@
 #
 # Usage: ./02-hermes.sh
 #
-# Editing config.yaml alone triggers HERMES_MCP_CONFIG_DRIFT on the next restart,
-# so this script re-anchors .config-hash and restarts once to confirm, rolling
-# back if the container comes up unhealthy. See OPERATIONS.md.
+# Editing config.yaml alone triggers HERMES_MCP_CONFIG_DRIFT on the next
+# restart, so this script re-anchors .config-hash and restarts once to confirm,
+# rolling back if the container comes up unhealthy. See OPERATIONS.md.
 # ============================================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,11 +28,13 @@ esac
 
 log_step "Step 2/5: Hermes approvals.mode=${APPROVALS_MODE}"
 
-# Get container ID
+# Container is looked up by the openshell.ai/sandbox-name label, not by name
 CID="$(sandbox_container_id)"
-[ -n "$CID" ] || die "Cannot find sandbox container (openshell-${SANDBOX_NAME})"
+[ -n "$CID" ] || die "Cannot find the container for sandbox '${SANDBOX_NAME}'.
+  Check: docker ps -a --filter 'label=openshell.ai/sandbox-name=${SANDBOX_NAME}'"
 
-# Copy both config.yaml and its .config-hash lock to host /tmp (needed together for rollback)
+# Copy both config.yaml and its .config-hash lock to host /tmp; rollback needs
+# the pair, since restoring one without the other re-creates the drift
 remote "docker cp ${CID}:/sandbox/.hermes/config.yaml /tmp/hm-config.bak && docker cp ${CID}:/sandbox/.hermes/.config-hash /tmp/hm-hash.bak" \
   || log_warn "Backup failed (continuing)"
 

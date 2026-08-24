@@ -1,4 +1,8 @@
 #!/bin/sh
+# Install Open WebUI 0.9.5 into /sandbox/open-webui, inside the sandbox.
+# Uploaded and run by 03-openwebui.sh; not meant to be run on the host.
+# Applies two upstream patches (see below) and mints the WebUI secret key.
+# Idempotent: an existing venv and secret key are reused.
 set -eu
 
 OPEN_WEBUI_ROOT=/sandbox/open-webui
