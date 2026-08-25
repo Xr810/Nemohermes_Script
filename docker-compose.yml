@@ -1,0 +1,72 @@
+# One-command deploy:
+#   cp .env.example .env     # then set INFERENCE_API_KEY
+#   docker compose up -d
+#
+# The image carries no configuration. Every value comes from .env at container
+# start, so changing the key or the model is `docker compose up -d`, never a
+# rebuild, and no secret is stored in an image layer.
+
+services:
+  nemohermes:
+    build: .
+    image: nemohermes:local
+    container_name: nemohermes
+    network_mode: host
+    restart: unless-stopped
+
+    # ---- systemd as PID 1 ----
+    # NemoClaw runs the OpenShell gateway as a systemd user unit and will not
+    # attach to a listener it cannot prove that unit owns, so onboard needs a
+    # real init: cgroup write access (privileged) plus tmpfs for the runtime
+    # dirs systemd expects to own.
+    #
+    # cgroup v2 host: leave the cgroup namespace private (Docker's default) and
+    # let systemd mount its own writable cgroup2 inside it. The old recipe of
+    # `cgroup: host` plus a rw bind of the host /sys/fs/cgroup is cgroup v1 era
+    # — here it would hand this systemd the host's whole cgroup tree.
+    privileged: true
+    # Docker's tmpfs defaults are noexec and size=64m. /tmp must NOT be in here:
+    # the OpenShell installer unpacks into it and then gates installation on
+    # `[ -x $tmpdir/openshell-gateway ]`, so noexec makes that test false and
+    # 64m cannot even hold the 67 MB gateway binary — the installer then skips
+    # the Docker-driver binaries and onboard dies with "did not install the
+    # required Docker-driver binaries".
+    tmpfs:
+      - /run:size=256m
+      - /run/lock:size=8m
+    # systemd shuts down on SIGRTMIN+3; the Dockerfile sets STOPSIGNAL to match.
+    stop_grace_period: 45s
+
+    # Required on purpose: without .env the container would start with no
+    # inference endpoint and only fail minutes later, inside onboard. Compose
+    # instead refuses immediately with "env file ... not found".
+    env_file:
+      - .env
+    # Set here, not in .env, so the image always knows it is the compose build.
+    environment:
+      IN_CONTAINER: "1"
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Identical path on BOTH sides, and that is the whole point. NemoClaw
+      # hands the host Docker daemon absolute paths from in here — the sandbox
+      # supervisor binary, the guest TLS bundle — and the daemon resolves them
+      # in the host filesystem. Behind a named volume (or /root) it finds
+      # nothing, silently mounts an empty directory, and every sandbox dies
+      # with: exec ".../openshell-sandbox": is a directory.
+      # It has to be /root specifically: systemd synthesizes root's home as
+      # /root regardless of /etc/passwd, so its user manager looks for the
+      # gateway unit and resolves %E / %S there. Pointing HOME anywhere else
+      # splits the two and onboard fails step 2/8 on unit metadata.
+      # This also persists nemoclaw state and the installed CLI across a
+      # recreate, so the ~107 MB of binaries are downloaded once.
+      - /root:/root
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:${HERMES_API_PORT:-8642}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # First start boots systemd, installs the CLI and creates the sandbox.
+      start_period: 900s
+
