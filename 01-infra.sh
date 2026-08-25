@@ -46,7 +46,15 @@ check_inference_dns() {
 # ---- Preflight: user systemd must have the docker group ----
 # Installer adds docker group after this manager started; it never picks up
 # new groups. Gateway then cannot reach docker.sock. Fail fast (reboot to fix).
+# Skipped in the compose image (root + host docker.sock, no user systemd) and
+# when docker is already usable from this process.
 check_user_manager_docker_group() {
+  if in_container; then
+    return 0
+  fi
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
   local dgid mgr
   dgid="$(getent group docker 2>/dev/null | cut -d: -f3)"
   [ -n "$dgid" ] || return 0
@@ -90,18 +98,25 @@ command -v nemoclaw >/dev/null 2>&1 || need_install=1
 # The NemoClaw installer needs git/curl/binutils(strings)/zstd/lsof on a fresh VM.
 if [ "$need_install" = "1" ]; then
   log_info "Installing prerequisites (git curl binutils zstd lsof)..."
-  sudo apt-get update -qq
-  sudo apt-get install -y git curl binutils zstd lsof \
-    || die "Failed to install prerequisites (git curl binutils zstd lsof)"
+  if [ "$(id -u)" -eq 0 ]; then
+    apt-get update -qq
+    apt-get install -y git curl binutils zstd lsof \
+      || die "Failed to install prerequisites (git curl binutils zstd lsof)"
+  else
+    sudo apt-get update -qq
+    sudo apt-get install -y git curl binutils zstd lsof \
+      || die "Failed to install prerequisites (git curl binutils zstd lsof)"
+  fi
 fi
 
 # ---- Auto-install if docker / openshell / nemoclaw are missing ----
-# Official installer does three things: Node.js, CLI/binaries, then onboard
-# (gateway + sandbox). Inference settings come from the env vars below.
+# Official installer installs Node.js + OpenShell/NemoClaw binaries. It may
+# also start onboard. Onboard uses a local sandbox image when present, and
+# pulls a published candidate when it is missing.
 if [ "$need_install" = "1" ]; then
   log_info "Missing components detected, running NVIDIA official installer (agent=${AGENT})..."
   log_info "  Inference: ${INFERENCE_BASE_URL}  model=${INFERENCE_MODEL}"
-  echo -e "${C_YELLOW}  (Installs Node.js + OpenShell + NemoClaw, then auto-onboards the sandbox)${C_RESET}"
+  echo -e "${C_YELLOW}  (Installs Node.js + OpenShell + NemoClaw; gateway creates the sandbox)${C_RESET}"
 
   check_inference_dns
   require_inference_config
@@ -159,17 +174,26 @@ fi
 # ---- Onboard if the sandbox is not Ready ----
 # Commands may already be installed (installer skipped) while the sandbox
 # is still missing, e.g. a previous onboard failed halfway.
+#
+# Do not pass --fresh unless ONBOARD_FRESH=1: that discards the onboard
+# session and bypasses locally recorded base-image metadata. Without --fresh,
+# onboard reuses a valid local image and only pulls when it is missing.
 if ! remote "openshell -g nemoclaw sandbox list 2>/dev/null" | grep -q "${SANDBOX_NAME}.*Ready"; then
-  log_info "Sandbox '${SANDBOX_NAME}' not Ready — running onboard (agent=${AGENT})..."
+  log_info "Sandbox '${SANDBOX_NAME}' not Ready — gateway will create it (agent=${AGENT})..."
   check_user_manager_docker_group
   check_inference_dns
   require_inference_config
+  onboard_cmd=(nemoclaw onboard --non-interactive --agent "${AGENT}" --name "${SANDBOX_NAME}" --yes)
+  if [ "${ONBOARD_FRESH:-0}" = "1" ]; then
+    log_warn "ONBOARD_FRESH=1: discarding the onboard session (may re-resolve the base image)"
+    onboard_cmd+=(--fresh)
+  fi
   NEMOCLAW_PROVIDER=custom \
     NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}" \
     NEMOCLAW_MODEL="${INFERENCE_MODEL}" \
     COMPATIBLE_API_KEY="${INFERENCE_API_KEY}" \
     NEMOCLAW_PREFERRED_API=openai-completions \
-    nemoclaw onboard --non-interactive --fresh --agent "${AGENT}" --name "${SANDBOX_NAME}" --yes \
+    "${onboard_cmd[@]}" \
     || die "onboard failed. Check the inference endpoint/API key, then retry ./deploy.sh"
 fi
 
@@ -181,4 +205,6 @@ wait_sandbox_ready || {
 }
 log_ok "Sandbox '${SANDBOX_NAME}' Ready"
 
-log_ok "Step 1 done (binaries + Docker + sandbox onboarded). Next: ./02-hermes.sh"
+install_hermes_host_forwards
+
+log_ok "Step 1 done (binaries + Docker + sandbox onboarded + Hermes API). Next: ./02-hermes.sh"

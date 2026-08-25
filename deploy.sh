@@ -3,10 +3,11 @@
 # deploy — NemoHermes deployment entry point (wizard + ordered steps)
 #
 # Usage:
-#   ./deploy.sh                    # full pipeline
+#   ./deploy.sh                    # steps 1, 2, 4, 5 (Open WebUI / step 3 skipped)
 #   ./deploy.sh --skip-approvals   # leave approvals.mode unchanged
 #   ./deploy.sh --skip-mcp         # skip MCP registration
 #   ./deploy.sh --skip-config      # no wizard, use current config.env
+#   ./deploy.sh 03                 # install Open WebUI later (optional)
 #   ./deploy.sh 01 02 ...          # run only the given steps
 #
 # Each step lives in NN-*.sh and shares lib.sh / config.env. See README.md.
@@ -74,12 +75,23 @@ run_step 01-infra      "Step 1: Infrastructure (installs binaries + onboards san
 if [ "$SKIP_APPROVALS" = "0" ]; then
   run_step 02-hermes   "Step 2: Approvals mode"
 fi
-run_step 03-openwebui  "Step 3: Open WebUI"
+# Step 3 (Open WebUI) is opt-in: only when 03 is listed on the command line.
+if [ "${#SELECTED[@]}" -gt 0 ] && printf '%s\n' "${SELECTED[@]}" | grep -qx 03; then
+  run_step 03-openwebui "Step 3: Open WebUI"
+else
+  log_info "Step 3 (Open WebUI) skipped — point a remote Open WebUI at the Hermes API"
+fi
 if [ "$SKIP_MCP" = "0" ]; then
   run_step 04-mcp      "Step 4: MCP Router"
 fi
 run_step 05-verify     "Step 5: End-to-end verification"
 
 log_step "Deployment finished"
-log_info "Open WebUI: http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
-[ "$SKIP_MCP" = "0" ] && [ -n "${MCP_URL:-}" ] && log_info "MCP: ${MCP_URL}"
+log_info "Hermes API: http://127.0.0.1:${HERMES_API_PORT:-8642}/v1"
+log_info "Dashboard:  http://127.0.0.1:${HERMES_DASHBOARD_PORT:-18789}/"
+if [ "$SKIP_MCP" = "0" ] && [ -n "${MCP_URL:-}" ]; then
+  log_info "MCP: ${MCP_URL}"
+fi
+# Explicit: the trailing test above would otherwise become the script's exit
+# status, so ./deploy.sh --skip-mcp reported failure after a clean run.
+exit 0

@@ -21,6 +21,34 @@ log_step()  { echo; echo -e "${C_BOLD}${C_CYAN}━━━ $* ━━━${C_RESET}"
 
 die() { log_err "$*"; exit 1; }
 
+# True when running inside the all-in-one image (docker-compose / Dockerfile).
+in_container() {
+  [ -n "${IN_CONTAINER:-}" ] && return 0
+  [ -f /.dockerenv ] && return 0
+  [ -f /run/.containerenv ] && return 0
+  return 1
+}
+
+# NVIDIA installer puts binaries in ~/.local/bin and Node under nvm.
+prepend_local_path() {
+  case ":${PATH}:" in
+    *":${HOME}/.local/bin:"*) ;;
+    *) export PATH="${HOME}/.local/bin:${PATH}" ;;
+  esac
+  local nvmbin
+  for nvmbin in "${HOME}"/.nvm/versions/node/*/bin; do
+    [ -d "$nvmbin" ] || continue
+    case ":${PATH}:" in
+      *":${nvmbin}:"*) ;;
+      *) export PATH="${nvmbin}:${PATH}" ;;
+    esac
+  done
+}
+
+forward_bind_addr() {
+  printf '%s' "${FORWARD_BIND:-127.0.0.1}"
+}
+
 # NemoClaw onboard: 1-19 chars, lowercase, starts with a letter,
 # letters/digits/single internal hyphens only, ends with a letter or digit.
 sandbox_name_valid() {
@@ -235,6 +263,12 @@ load_config() {
   # shellcheck disable=SC1091
   source "${dir}/config.env"
   load_secrets
+  prepend_local_path
+  if in_container && [ -z "${FORWARD_BIND:-}" ]; then
+    FORWARD_BIND="0.0.0.0"
+  fi
+  FORWARD_BIND="${FORWARD_BIND:-127.0.0.1}"
+  export FORWARD_BIND
 }
 
 # Empty REMOTE_HOST = run locally; set = run over ssh (remote deploy)
@@ -314,4 +348,147 @@ restart_sandbox_verify() {
 # openshell-default--<sandbox>-<uuid>
 sandbox_container_id() {
   remote "docker ps -a --filter 'label=openshell.ai/sandbox-name=${SANDBOX_NAME}' --format '{{.ID}}' | head -1"
+}
+
+# Hermes dashboard + API host forwards. Onboard publishes these, but those
+# tunnels die with the gateway. Compose does the same in the image entrypoint.
+# No-op inside the compose image (no user systemd).
+install_hermes_host_forwards() {
+  in_container && return 0
+
+  local unit_dir bind openshell api_port dash_port
+  unit_dir="${UNIT_DIR:-$HOME/.config/systemd/user}"
+  bind="$(forward_bind_addr)"
+  api_port="${HERMES_API_PORT:-8642}"
+  dash_port="${HERMES_DASHBOARD_PORT:-18789}"
+  openshell="$(command -v openshell)"
+  [ -n "$openshell" ] || die "openshell not on PATH"
+  mkdir -p "$unit_dir"
+
+  local gateway_unit="${unit_dir}/nemoclaw-openshell-gateway.service"
+  if [ -f "$gateway_unit" ]; then
+    sed -i '/^After=default\.target$/d' "$gateway_unit"
+  fi
+  mkdir -p "${unit_dir}/nemoclaw-openshell-gateway.service.d"
+  cat > "${unit_dir}/nemoclaw-openshell-gateway.service.d/no-after-default.conf" <<'EOF'
+[Unit]
+# Intentionally empty: After=default.target is removed from the unit file above.
+EOF
+
+  cat > "${unit_dir}/je-hermes-dashboard.service" <<EOF
+[Unit]
+Description=Hermes dashboard inside the OpenShell sandbox
+After=nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${openshell} -g nemoclaw sandbox exec -n ${SANDBOX_NAME} --no-tty -- hermes dashboard --no-open --port 9119 --skip-build
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "${unit_dir}/je-hermes-dashboard-forward.service" <<EOF
+[Unit]
+Description=Forward Hermes dashboard to ${bind}:${dash_port}
+After=je-hermes-dashboard.service nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${openshell} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 9119 --local ${bind}:${dash_port}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "${unit_dir}/je-hermes-api-forward.service" <<EOF
+[Unit]
+Description=Forward Hermes API to ${bind}:${api_port}
+After=nemoclaw-openshell-gateway.service
+Requires=nemoclaw-openshell-gateway.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=${openshell} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 18642 --local ${bind}:${api_port}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+  systemctl --user daemon-reload
+  if [ "$(loginctl show-user "${USER}" -p Linger --value 2>/dev/null || true)" != "yes" ]; then
+    loginctl enable-linger "${USER}" 2>/dev/null \
+      || sudo loginctl enable-linger "${USER}" \
+      || log_warn "Could not enable lingering for ${USER}; after reboot, log in once so user systemd can start the Hermes API"
+  fi
+  systemctl --user reset-failed \
+    je-hermes-dashboard.service je-hermes-dashboard-forward.service je-hermes-api-forward.service \
+    2>/dev/null || true
+  systemctl --user enable --now je-hermes-dashboard.service \
+    || log_warn "Hermes dashboard start failed (can retry later)"
+  systemctl --user enable --now je-hermes-dashboard-forward.service \
+    || log_warn "Hermes dashboard forward start failed (can retry later)"
+  systemctl --user enable --now je-hermes-api-forward.service \
+    || log_warn "Hermes API forward start failed (can retry later)"
+  log_ok "Hermes API http://${bind}:${api_port}/v1  dashboard http://${bind}:${dash_port}/"
+}
+
+# ---- Container-mode service supervision ----
+# The compose image has no user systemd, so the long-running pieces are started
+# with setsid+nohup. Idempotency comes from pgrep on the same patterns
+# 05-verify.sh checks, so calling this repeatedly is safe.
+RUNTIME_LOG_DIR="${RUNTIME_LOG_DIR:-/var/log}"
+
+ensure_runtime_service() {
+  local name="$1" pattern="$2"
+  shift 2
+  if pgrep -f "$pattern" >/dev/null 2>&1; then
+    log_info "${name} already running"
+    return 0
+  fi
+  mkdir -p "$RUNTIME_LOG_DIR"
+  log_info "starting ${name} (log: ${RUNTIME_LOG_DIR}/${name}.log)"
+  nohup setsid "$@" >>"${RUNTIME_LOG_DIR}/${name}.log" 2>&1 &
+  return 0
+}
+
+# Open WebUI plus its host-side forward, container equivalent of the
+# je-open-webui* units. The gateway, dashboard and Hermes API forward are owned
+# by the image entrypoint loop; starting a second copy here would fight it for
+# ports, so they are only checked. No-op outside a container.
+ensure_runtime_services() {
+  in_container || return 0
+
+  local openshell bind webui_port
+  openshell="$(command -v openshell || true)"
+  [ -n "$openshell" ] || die "openshell not on PATH"
+  bind="$(forward_bind_addr)"
+  webui_port="${WEBUI_PORT:-3000}"
+
+  ensure_runtime_service open-webui \
+    'sandbox exec .*start\.sh' \
+    "$openshell" -g nemoclaw sandbox exec -n "${SANDBOX_NAME}" --no-tty -- \
+    /sandbox/open-webui/start.sh
+
+  if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
+    ensure_runtime_service open-webui-forward \
+      "forward service ${SANDBOX_NAME} --target-port ${webui_port}" \
+      "$openshell" -g nemoclaw forward service "${SANDBOX_NAME}" \
+      --target-port "${webui_port}" --local "${bind}:${WEBUI_LOCAL_PORT}"
+  fi
+
+  pgrep -f "forward service ${SANDBOX_NAME} --target-port 18642" >/dev/null 2>&1 \
+    || log_warn "Hermes API forward is not running; the image entrypoint starts it"
 }

@@ -4,6 +4,9 @@
 #
 # Usage: ./03-openwebui.sh
 #
+# Ubuntu / ./deploy.sh only. The Docker image does not run this step — it
+# exposes the Hermes API for Open WebUI on another device instead.
+#
 # Installs a blank database (resources/open-webui-fresh.db), so the first visit
 # shows the "create admin" screen; step 3.5 polls for that account and then
 # imports the filter. Re-running this step discards existing WebUI users.
@@ -151,13 +154,19 @@ log_info "Placing filter source file..."
 sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/functions && cp ${OPENWEBUI_DIR}/hermes_source_files.py ${OPENWEBUI_DIR}/functions/hermes_source_files.py'" \
   || log_warn "Failed to place filter source (can be placed manually later)"
 
-# ---- 5. systemd units ----
-# Five units plus the cleanup helper: Open WebUI, its port forward, the Hermes
-# dashboard, and forwards for the dashboard and the Hermes API.
-log_info "Creating systemd units (Open WebUI + forwards + Hermes + cleanup)..."
-UNIT_DIR="${UNIT_DIR:-$HOME/.config/systemd/user}"
+# ---- 5. Cleanup helper + start Open WebUI ----
+# Host path: five systemd user units. Container image bakes Open WebUI in the
+# Dockerfile and does not run this step.
 LIBEXEC_DIR="${LIBEXEC_DIR:-$HOME/.local/libexec}"
-mkdir -p "$UNIT_DIR" "$LIBEXEC_DIR"
+mkdir -p "$LIBEXEC_DIR"
+BIND_ADDR="$(forward_bind_addr)"
+if in_container; then
+  log_info "Container mode: starting Open WebUI and forwards without systemd..."
+else
+  log_info "Creating systemd units (Open WebUI + forwards + Hermes + cleanup)..."
+  UNIT_DIR="${UNIT_DIR:-$HOME/.config/systemd/user}"
+  mkdir -p "$UNIT_DIR"
+fi
 
 # ---- 5a. Cleanup helper ----
 # Unquoted heredoc: $(command -v openshell), ${SANDBOX_NAME} and ${WEBUI_PORT}
@@ -186,6 +195,14 @@ echo 'Open WebUI process still present after cleanup timeout.' >&2
 exit 1
 EOF
 chmod +x "$LIBEXEC_DIR/je-open-webui-cleanup"
+
+if in_container; then
+  sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \
+    || log_warn "chmod +x start.sh failed"
+  ensure_runtime_services
+  wait_webui_listen 90 \
+    || { log_err "Open WebUI did not start. Logs: /var/log/open-webui.log"; tail -n 40 /var/log/open-webui.log 2>/dev/null || true; exit 1; }
+else
 
 # ---- 5b. Open WebUI unit ----
 cat > "$UNIT_DIR/je-open-webui.service" <<EOF
@@ -221,7 +238,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-ExecStart=$(command -v openshell) -g nemoclaw forward service ${SANDBOX_NAME} --target-port ${WEBUI_PORT} --local 127.0.0.1:${WEBUI_LOCAL_PORT}
+ExecStart=$(command -v openshell) -g nemoclaw forward service ${SANDBOX_NAME} --target-port ${WEBUI_PORT} --local ${BIND_ADDR}:${WEBUI_LOCAL_PORT}
 Restart=on-failure
 RestartSec=5
 
@@ -230,78 +247,13 @@ WantedBy=default.target
 EOF
 fi
 
-# ---- 5d. Break the gateway ordering cycle ----
-# NVIDIA's gateway unit has After=default.target AND WantedBy=default.target.
-# Requiring it from another WantedBy=default.target unit (Open WebUI / forwards)
-# forms an ordering cycle; systemd then deletes the WebUI start job on boot.
-# An empty After= drop-in does not clear that line on systemd 255, so strip it
-# from the unit file itself. Re-run this step after a gateway upgrade.
-GATEWAY_UNIT="${UNIT_DIR}/nemoclaw-openshell-gateway.service"
-if [ -f "$GATEWAY_UNIT" ]; then
-  sed -i '/^After=default\.target$/d' "$GATEWAY_UNIT"
-fi
-mkdir -p "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d"
-cat > "${UNIT_DIR}/nemoclaw-openshell-gateway.service.d/no-after-default.conf" <<'EOF'
-[Unit]
-# Intentionally empty: After=default.target is removed from the unit file above.
-EOF
-
-# ---- 5e. Hermes dashboard + API units ----
-# Onboard publishes these, but those forwards die with the gateway and are not
-# systemd units. Recreate them so they return on reboot. The dashboard runs on
-# sandbox port 9119 and the Hermes API on 18642.
-OPENSHELL_BIN="$(command -v openshell)"
-cat > "$UNIT_DIR/je-hermes-dashboard.service" <<EOF
-[Unit]
-Description=Hermes dashboard inside the OpenShell sandbox
-After=nemoclaw-openshell-gateway.service
-Requires=nemoclaw-openshell-gateway.service
-StartLimitIntervalSec=120
-StartLimitBurst=3
-
-[Service]
-Type=simple
-ExecStart=${OPENSHELL_BIN} -g nemoclaw sandbox exec -n ${SANDBOX_NAME} --no-tty -- hermes dashboard --no-open --port 9119 --skip-build
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-cat > "$UNIT_DIR/je-hermes-dashboard-forward.service" <<EOF
-[Unit]
-Description=Forward Hermes dashboard to localhost:18789
-After=je-hermes-dashboard.service nemoclaw-openshell-gateway.service
-Requires=nemoclaw-openshell-gateway.service
-StartLimitIntervalSec=120
-StartLimitBurst=3
-
-[Service]
-Type=simple
-ExecStart=${OPENSHELL_BIN} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 9119 --local 127.0.0.1:18789
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-cat > "$UNIT_DIR/je-hermes-api-forward.service" <<EOF
-[Unit]
-Description=Forward Hermes API to localhost:8642
-After=nemoclaw-openshell-gateway.service
-Requires=nemoclaw-openshell-gateway.service
-StartLimitIntervalSec=120
-StartLimitBurst=3
-
-[Service]
-Type=simple
-ExecStart=${OPENSHELL_BIN} -g nemoclaw forward service ${SANDBOX_NAME} --target-port 18642 --local 127.0.0.1:8642
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
+# ---- 5d. Gateway ordering cycle + Hermes dashboard/API units ----
+# Same units step 1 installs (lib.sh install_hermes_host_forwards): it also
+# strips After=default.target from the gateway unit, which would otherwise form
+# an ordering cycle with the WantedBy=default.target units written above and
+# make systemd drop the Open WebUI start job on boot. Re-run after a gateway
+# upgrade. Kept as one implementation so the ports cannot drift between steps.
+install_hermes_host_forwards
 
 systemctl --user daemon-reload
 
@@ -338,13 +290,9 @@ if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
 fi
 wait_webui_listen 90 \
   || { journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
-systemctl --user reset-failed je-hermes-dashboard.service je-hermes-dashboard-forward.service je-hermes-api-forward.service 2>/dev/null || true
-systemctl --user enable --now je-hermes-dashboard.service \
-  || log_warn "Hermes dashboard start failed (can retry later)"
-systemctl --user enable --now je-hermes-dashboard-forward.service \
-  || log_warn "Hermes dashboard forward start failed (can retry later)"
-systemctl --user enable --now je-hermes-api-forward.service \
-  || log_warn "Hermes API forward start failed (can retry later)"
+# The je-hermes-* units were enabled by install_hermes_host_forwards above.
+
+fi # in_container else (systemd path)
 
 # ---- 7. Wait for admin creation + import filter ----
 log_step "Step 3.5: Wait for admin creation and import filter"

@@ -1,8 +1,9 @@
 # Operations Guide
 
-Day-two operations for a deployment created by `./deploy.sh` (installation is
-covered in the [README](README.md)): changing the model or provider, managing
-MCP servers, restarting Open WebUI, and reading logs.
+Day-two operations for a deployment created by `docker compose up` or
+`./deploy.sh` (installation is covered in the [README](README.md)): changing the
+model or provider, managing MCP servers, and reading logs. Docker does not
+install Open WebUI; connect a remote Open WebUI to the Hermes API instead.
 
 **The OpenShell gateway is the source of truth.** Hermes inside the sandbox only
 executes what the gateway hands it. Change configuration through
@@ -20,6 +21,12 @@ All commands run **on the deployment host** (the machine where you ran
 cd ~/deploy && . config.env && echo "$SANDBOX_NAME"
 ```
 
+Inside the compose container the same commands work after:
+
+```bash
+docker compose exec nemohermes bash
+```
+
 If the host is a VM and you are working from outside it, prefix commands with
 your VM runner — for example `orbctl run -m <vm> …` for OrbStack — or simply SSH
 in first.
@@ -27,13 +34,16 @@ in first.
 ## Architecture
 
 ```text
-browser
-  → 127.0.0.1:3000 on the host          (je-open-webui-forward.service)
-    → Open WebUI in the sandbox          (je-open-webui.service → start.sh)
-      → Hermes API server in the sandbox (host:port from /sandbox/.hermes/.env)
-        → OpenShell gateway inference layer
-          → provider (OpenAI-compatible endpoint) → model
+Open WebUI on another device
+  → http://<this-host-ip>:8642/v1     (openshell forward → sandbox 18642)
+    → Hermes API server in the sandbox
+      → OpenShell gateway inference layer
+        → provider (OpenAI-compatible endpoint) → model
 ```
+
+Ubuntu `./deploy.sh` step 3 can still put Open WebUI in the sandbox on
+`127.0.0.1:3000`. The Docker image skips that and only publishes the Hermes API
+and dashboard.
 
 | Concern | Where you change it |
 |---|---|
@@ -56,9 +66,9 @@ TUI. Hermes ships a browser dashboard of its own, separate from Open WebUI.
 
 | Surface | Open it | Use it for |
 |---|---|---|
-| Open WebUI | `http://127.0.0.1:3000` | End-user chat, the front end this deploy installs |
-| Hermes dashboard | `http://127.0.0.1:18789/` | Agent sessions, skills, approvals |
-| Hermes API | `http://127.0.0.1:8642/v1` | Programmatic OpenAI-compatible access, health at `/health` |
+| Open WebUI | Ubuntu step 3: `http://127.0.0.1:3000`. Docker: a remote WebUI pointed at the Hermes API | Chat UI (not in the compose image) |
+| Hermes dashboard | `http://<host>:18789/` (Docker) or `http://127.0.0.1:18789/` (Ubuntu) | Agent sessions, skills, approvals |
+| Hermes API | `http://<host>:8642/v1` | OpenAI-compatible access for a remote Open WebUI; health at `/health` |
 | OpenShell TUI | `openshell term` | Sandboxes, providers, live egress and network approvals |
 | Hermes TUI | `nemoclaw <sandbox> exec -- hermes dashboard --tui` | The dashboard without a browser |
 
@@ -72,21 +82,27 @@ addresses. `FORWARD_PORTS` in `config.env` is unused.
 openshell -g nemoclaw forward list   # confirm 3000 / 8642 / 18789
 ```
 
-`openshell term` is keyboard-driven; `q` quits. To reach the web interfaces from
-another machine, forward ports `3000` and `18789` over SSH.
+`openshell term` is keyboard-driven; `q` quits. Docker already binds the Hermes
+API on `0.0.0.0:8642`. On Ubuntu, to reach loopback ports from another machine,
+forward `8642` and `18789` over SSH.
 
 ## Service management
 
-Step 3 creates five user units and enables lingering, so they all come back after
-a host reboot once the gateway is up.
+On a Ubuntu host these user units are written and lingering is enabled, so they
+all come back after a host reboot once the gateway is up.
 
-| Unit | Role |
-|---|---|
-| `je-open-webui.service` | Open WebUI in the sandbox, via `start.sh` |
-| `je-open-webui-forward.service` | Host `3000` → Open WebUI; skipped when `WEBUI_LOCAL_PORT` is empty |
-| `je-hermes-dashboard.service` | `hermes dashboard` on sandbox port `9119` |
-| `je-hermes-dashboard-forward.service` | Host `18789` → the dashboard |
-| `je-hermes-api-forward.service` | Host `8642` → the Hermes API on `18642` |
+| Unit | Written by | Role |
+|---|---|---|
+| `je-hermes-dashboard.service` | step 1 | `hermes dashboard` on sandbox port `9119` |
+| `je-hermes-dashboard-forward.service` | step 1 | Host `HERMES_DASHBOARD_PORT` (`18789`) → the dashboard |
+| `je-hermes-api-forward.service` | step 1 | Host `HERMES_API_PORT` (`8642`) → the Hermes API on `18642` |
+| `je-open-webui.service` | step 3 | Open WebUI in the sandbox, via `start.sh` |
+| `je-open-webui-forward.service` | step 3 | Host `3000` → Open WebUI; skipped when `WEBUI_LOCAL_PORT` is empty |
+
+Step 3 is opt-in (`./deploy.sh 03`), so a default run leaves only the three
+Hermes units. Both steps go through the same `install_hermes_host_forwards` in
+`lib.sh`, so re-running step 3 rewrites the Hermes units with the same ports
+rather than drifting from step 1.
 
 The two Open WebUI units are enabled and then *restarted*, not started with
 `enable --now`, so that re-running step 3 actually picks up the blank database it
@@ -108,6 +124,15 @@ port.
 
 If the page will not load, check the forward unit first — the app is usually
 running and only the tunnel died.
+
+**Compose image:** no Open WebUI. The container uses the host Docker socket
+(`network_mode: host`). Onboard starts the OpenShell gateway, which creates the
+sandbox, then forwards Hermes API `:8642` and dashboard `:18789`. Restart with
+`docker compose restart`. Connection file:
+
+```bash
+docker compose exec nemohermes cat /root/hermes-openai.env
+```
 
 ## Provider and model
 
@@ -172,12 +197,20 @@ itself. The sandbox only ever sees an `openshell:resolve:env:<KEY>` placeholder,
 which the gateway resolves on egress while enforcing the MCP policy. The
 deployment registers this server as `mcp-router`.
 
-To add the router after the fact, set `MCP_URL` in `config.env`, export the
-token, and re-run the step:
+To add the router after the fact on an Ubuntu host, set `MCP_URL` in
+`config.env`, export the token, and re-run the step:
 
 ```bash
 export MCP_ROUTER_TOKEN='...'
 ./deploy.sh 04
+```
+
+On the compose image, set `MCP_URL` and `MCP_ROUTER_TOKEN` in `.env` and
+recreate the container — the entrypoint registers the router on start and skips
+it when it is already present:
+
+```bash
+docker compose up -d
 ```
 
 ### Local stdio
@@ -202,8 +235,11 @@ the next agent request.
 Use the deployment step rather than changing it by hand:
 
 ```bash
-# edit APPROVALS_MODE in config.env to off | smart | manual
+# Ubuntu: edit APPROVALS_MODE in config.env to off | smart | manual
 ./deploy.sh 02
+
+# Docker: edit APPROVALS_MODE in .env, then
+docker compose up -d
 ```
 
 NemoClaw pins the SHA-256 of `/sandbox/.hermes/config.yaml` in
