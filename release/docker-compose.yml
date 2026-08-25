@@ -1,0 +1,37 @@
+# Ship with a pre-loaded image (no build on the target).
+#
+# On the target machine:
+#   docker load -i nemohermes-local.tar
+#   cp .env.example .env     # then set INFERENCE_API_KEY
+#   docker compose up -d
+#
+# The tar carries no secrets — the key lives only in .env on the target.
+
+services:
+  nemohermes:
+    image: nemohermes:local
+    container_name: nemohermes
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # Required on purpose: without .env the container would start with no
+    # inference endpoint and only fail minutes later, inside onboard. Compose
+    # instead refuses immediately with "env file ... not found".
+    env_file:
+      - .env
+    # Set here, not in .env, so the image always knows it is the compose build.
+    environment:
+      IN_CONTAINER: "1"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - nemohermes-home:/root
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:${HERMES_API_PORT:-8642}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # First start installs the CLI and creates the sandbox; that is slow.
+      start_period: 900s
+
+volumes:
+  nemohermes-home:
