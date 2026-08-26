@@ -15,24 +15,17 @@
 
 FROM ubuntu:24.04
 
-# HOME stays /root, and /root is bind-mounted from the host at the same path
-# (see docker-compose.yml). Two separate constraints force exactly this:
+# HOME stays /root. systemd carries a synthesized user record for root with
+# the home directory hardcoded to /root and ignores /etc/passwd for it, so the
+# user manager resolves %h, %E and %S -- and its unit search path -- under
+# /root no matter what HOME says. Point HOME elsewhere and the gateway unit is
+# written where systemd will not look, and onboard fails step 2/8 with
+# "service identity query returned invalid metadata".
 #
-#  1. NemoClaw hands absolute paths under HOME -- the guest TLS bundle, the
-#     sandbox supervisor binary -- to the host Docker daemon, which resolves
-#     them in the host filesystem, not in here. Behind a named volume the
-#     daemon finds nothing, silently mounts an empty directory, and the sandbox
-#     dies with: exec "/opt/openshell/bin/openshell-sandbox": is a directory.
-#
-#  2. The path cannot simply be moved somewhere neutral either. systemd carries
-#     a synthesized user record for root with the home directory hardcoded to
-#     /root and ignores /etc/passwd for it, so the user manager resolves %h, %E
-#     and %S -- and its unit search path -- under /root no matter what HOME
-#     says. Point HOME elsewhere and the gateway unit is written where systemd
-#     will not look, and onboard fails step 2/8 with "service identity query
-#     returned invalid metadata".
-#
-# So /root is the one path that host Docker, systemd and NemoClaw all agree on.
+# Compose mounts a named volume at /root (not the host's /root) and another at
+# /var/lib/docker. NemoClaw hands absolute paths under HOME to *this*
+# container's dockerd, which resolves them in the same filesystem, so the old
+# Docker-out-of-Docker empty-directory bind-mount failure does not apply.
 #
 # NOTE: do NOT set NEMOCLAW_GATEWAY_BIND_ADDRESS=0.0.0.0 here. It looks like
 # the fix for "sandbox containers cannot reach the gateway", but NemoClaw
@@ -48,7 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
     PATH="/root/bin:/root/.local/bin:/usr/local/bin:${PATH}"
 
-# ---- 01-infra.sh: host packages (NVIDIA CLI is installed at first run; it
+# ---- 01-infra.sh: packages (NVIDIA CLI is installed at first run; it
 # needs a live Docker engine, which does not exist at build time) ----
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -66,6 +59,8 @@ RUN apt-get update \
       dbus-user-session \
       docker.io \
       docker-buildx \
+      iptables \
+      nftables \
       procps \
       gawk \
       openssl \
@@ -81,9 +76,20 @@ RUN apt-get update \
 # attach to a gateway it cannot prove is supervised: see
 # SUPPORTED_GATEWAY_SUPERVISOR_KINDS in the nemoclaw source, which accepts only
 # systemd-system and systemd-user. Onboard therefore cannot complete without a
-# real init. Mask the units that want hardware or a tty, and pre-enable
-# lingering so root's user manager (user@0.service) starts at boot instead of
-# waiting for a login that never happens in a container.
+# real init. Mask the units that want hardware or a tty, enable inner docker
+# (do not mask docker.service / docker.socket: Ubuntu's docker.service
+# Requires=docker.socket), and pre-enable lingering so root's user manager
+# (user@0.service) starts at boot instead of waiting for a login that never
+# happens in a container. containerd is a dependency of docker.service and is
+# left unmasked.
+COPY <<'DAEMONJSON' /etc/docker/daemon.json
+{
+  "storage-driver": "overlay2",
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "iptables": true,
+  "ip-forward": true
+}
+DAEMONJSON
 RUN systemctl mask \
       systemd-udevd.service \
       systemd-udevd-kernel.socket \
@@ -96,9 +102,8 @@ RUN systemctl mask \
       getty.target \
       console-getty.service \
       getty@tty1.service \
-      docker.service \
-      docker.socket \
  && systemctl set-default multi-user.target \
+ && systemctl enable docker.service docker.socket \
  && mkdir -p /var/lib/systemd/linger \
  && touch /var/lib/systemd/linger/root
 
@@ -117,7 +122,7 @@ if [ -r /proc/1/environ ]; then
     case "$kv" in
       INFERENCE_*|SANDBOX_NAME=*|APPROVALS_MODE=*|MCP_*|FORWARD_BIND=*|\
       HERMES_*|IN_CONTAINER=*|AGENT=*|ONBOARD_FRESH=*|SANDBOX_WAIT_SECS=*|\
-      NEMOCLAW_*)
+      DOCKER_WAIT_SECS=*|USER_MANAGER_WAIT_SECS=*|NEMOCLAW_*)
         export "$kv"
         ;;
     esac
@@ -125,7 +130,7 @@ if [ -r /proc/1/environ ]; then
 fi
 
 export HOME="${HOME:-/root}"
-export PATH="${HOME}/.local/bin:/usr/local/bin:${PATH}"
+export PATH="${HOME}/bin:${HOME}/.local/bin:/usr/local/bin:${PATH}"
 for nvmbin in "${HOME}"/.nvm/versions/node/*/bin; do
   [ -d "$nvmbin" ] && export PATH="${nvmbin}:${PATH}"
 done
@@ -165,13 +170,38 @@ cid() {
   docker ps -a --filter "label=openshell.ai/sandbox-name=${SANDBOX_NAME}" --format '{{.ID}}' | awk 'NR==1{print}'
 }
 
+sandbox_is_ready() {
+  timeout 5 openshell -g nemoclaw sandbox list 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | grep -q "${SANDBOX_NAME}[[:space:]].*Ready" && return 0
+  return 1
+}
+
+first_ready_sandbox() {
+  timeout 5 openshell -g nemoclaw sandbox list 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' \
+    | awk 'NR > 1 && $NF == "Ready" { print $1; exit }' || true
+  return 0
+}
+
+# Gateway and the recovered container can take a few seconds to answer
+# GetSandbox. Treat "list failed" as not-ready rather than jumping into
+# onboard, which would otherwise run on every compose restart.
+wait_sandbox_listed_ready() {
+  local secs="${SANDBOX_READY_GRACE_SECS:-8}" waited=0
+  while [ "$waited" -lt "$secs" ]; do
+    sandbox_is_ready && return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 wait_sandbox_ready() {
   local secs="${SANDBOX_WAIT_SECS:-180}" waited=0
   log "waiting for sandbox '${SANDBOX_NAME}' Ready (max ${secs}s)"
   while [ "$waited" -lt "$secs" ]; do
-    if openshell -g nemoclaw sandbox list 2>/dev/null | grep "${SANDBOX_NAME}.*Ready" >/dev/null; then
-      return 0
-    fi
+    sandbox_is_ready && return 0
     sleep 5
     waited=$((waited + 5))
   done
@@ -194,11 +224,15 @@ lan_ip() {
 }
 
 write_openai_env() {
-  local id="$1" key host_hint
+  local id="$1" key host_hint=""
   docker cp "${id}:/sandbox/.hermes/.env" /tmp/hermes.env
   key="$(awk -F= '/^API_SERVER_KEY=/{print substr($0, index($0,"=")+1); exit}' /tmp/hermes.env | tr -d '"' | tr -d "'")"
   [ -n "$key" ] || die "sandbox /sandbox/.hermes/.env has no API_SERVER_KEY"
-  host_hint="$(lan_ip || true)"
+  # Published ports land on the host. This container's eth0 is a compose-network
+  # address other devices cannot route to, so do not put it in the hint file.
+  if [ -z "${IN_CONTAINER:-}" ]; then
+    host_hint="$(lan_ip || true)"
+  fi
   umask 077
   cat > "${HOME}/hermes-openai.env" <<EOF
 # Point another device's Open WebUI at this (Admin → Connections → OpenAI).
@@ -249,8 +283,21 @@ reconcile_gateway_bind() {
   sleep 5
 }
 
-[ -S /var/run/docker.sock ] || die "mount the host Docker socket at /var/run/docker.sock"
-docker info >/dev/null 2>&1 || die "host Docker engine is not usable"
+# Inner dockerd is a systemd unit, not a bind-mounted host socket. It can lag
+# a few seconds behind PID 1 even with After=docker.service.
+wait_docker() {
+  local secs="${DOCKER_WAIT_SECS:-90}" waited=0
+  while [ "$waited" -lt "$secs" ]; do
+    if [ -S /var/run/docker.sock ] && docker info >/dev/null 2>&1; then
+      log "inner docker engine ready"
+      return 0
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+wait_docker || die "inner docker engine never became ready; check: systemctl status docker.service"
 
 # ---- systemd user manager ----
 # Onboard drives the gateway through `systemctl --user`, which needs root's
@@ -318,6 +365,23 @@ watch_gateway_bridge_route() {
 
 install_gateway_bridge_route || watch_gateway_bridge_route
 
+# Compose publishes 8642/18789 onto this container's eth0. OpenShell's own
+# forwards bind 127.0.0.1, so docker-proxy would otherwise get connection
+# reset. Same route_localnet trick as the gateway DNAT.
+install_published_port_routes() {
+  local p
+  sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
+  for p in "${HERMES_API_PORT}" "${HERMES_DASHBOARD_PORT}"; do
+    [ -n "$p" ] || continue
+    iptables -t nat -C PREROUTING -p tcp --dport "$p" \
+      -j DNAT --to-destination "127.0.0.1:${p}" 2>/dev/null && continue
+    iptables -t nat -A PREROUTING -p tcp --dport "$p" \
+      -j DNAT --to-destination "127.0.0.1:${p}" 2>/dev/null || return 1
+    log "published port ${p} -> 127.0.0.1:${p}"
+  done
+}
+install_published_port_routes || log "could not DNAT published API/dashboard ports to loopback"
+
 # ---- stale lifecycle locks ----
 # NemoClaw guards sandbox mutations with lock files under ~/.nemoclaw/state,
 # recording the owner pid and PID namespace. Those live in the persisted /root
@@ -378,7 +442,7 @@ clear_errored_sandbox() {
   # non-zero whenever the gateway is not up yet. Without the guard the failing
   # pipeline propagates through the assignment and set -e kills the script here,
   # before onboard ever runs.
-  row="$(openshell -g nemoclaw sandbox list 2>/dev/null | awk -v n="${SANDBOX_NAME}" '$1 == n {print}' | head -1 || true)"
+  row="$(timeout 5 openshell -g nemoclaw sandbox list 2>/dev/null | awk -v n="${SANDBOX_NAME}" '$1 == n {print}' | head -1 || true)"
   [ -n "$row" ] || return 0
   phase="$(printf '%s' "$row" | sed 's/\x1b\[[0-9;]*m//g' | awk '{print $NF}')"
   [ "$phase" = "Error" ] || return 0
@@ -387,31 +451,69 @@ clear_errored_sandbox() {
   sleep 3
 }
 
-# ---- host-visible binaries (Docker-out-of-Docker) ----
-# The gateway asks the HOST docker daemon to bind-mount the sandbox supervisor
-# into every sandbox container. That path is resolved on the host, so the copy
-# the installer put in this container's /usr/local/bin is invisible to it.
-# Publish it under HOME, which is the one tree with an identical path on both
-# sides, and tell NemoClaw to use that copy.
+# compose down stops inner containers. Restart them if the bind sources still
+# exist; otherwise remove so onboard can recreate with paths under HOME/bin.
+# Match any OpenShell sandbox label — the NVIDIA installer may have created
+# one named after the agent rather than SANDBOX_NAME. Policy fetch needs the
+# gateway; callers must start it first.
+recover_stopped_sandbox() {
+  local id status n=0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    status="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)"
+    case "$status" in
+      running|restarting|"") continue ;;
+    esac
+    log "sandbox container ${id} is ${status}; attempting start"
+    docker start "$id" >/dev/null 2>&1 || true
+    n=0
+    while [ "$n" -lt 20 ]; do
+      status="$(docker inspect -f '{{.State.Status}}' "$id" 2>/dev/null || true)"
+      [ "$status" = "running" ] && break
+      sleep 1
+      n=$((n + 1))
+    done
+    if [ "$status" != "running" ]; then
+      log "sandbox container ${id} would not start (status ${status:-missing}); removing so onboard can recreate"
+      docker rm "$id" >/dev/null 2>&1 || true
+    fi
+  done <<EOF
+$(docker ps -aq --filter "label=openshell.ai/sandbox-name" 2>/dev/null)
+EOF
+}
+
+# ---- CLI and supervisor on a stable HOME path ----
+# The NVIDIA installer often drops `openshell` in /usr/local/bin (wrapper
+# writable layer). That vanishes on `compose down`. Copy it, plus the
+# supervisor binaries, into HOME/bin (the named volume) so the next start
+# finds them on PATH without re-running the installer.
 publish_shared_binaries() {
   local dst="${HOME}/bin" name src
-  mkdir -p "$dst"
-  for name in openshell-sandbox openshell-gateway; do
+  mkdir -p "$dst" /usr/local/bin
+  for name in openshell openshell-sandbox openshell-gateway; do
     src="$(command -v "$name" 2>/dev/null || true)"
     [ -n "$src" ] || continue
-    case "$src" in "$dst"/*) continue ;; esac
-    if [ ! -e "$dst/$name" ] || ! cmp -s "$src" "$dst/$name"; then
-      install -m 755 "$src" "$dst/$name" || return 1
-      log "published $name to $dst (path the host daemon can resolve)"
+    case "$src" in "$dst"/*) ;; *)
+      if [ ! -e "$dst/$name" ] || ! cmp -s "$src" "$dst/$name" 2>/dev/null; then
+        # Volume copy; skip if src is already the symlink we are about to write.
+        if [ ! -L "$src" ]; then
+          install -m 755 "$src" "$dst/$name" || return 1
+          log "published $name to $dst"
+        fi
+      fi
+      ;;
+    esac
+    rmdir "/usr/local/bin/$name" 2>/dev/null || true
+    if [ -x "$dst/$name" ]; then
+      ln -sfn "$dst/$name" "/usr/local/bin/$name"
     fi
   done
   [ -x "$dst/openshell-sandbox" ] || return 1
-  export NEMOCLAW_OPENSHELL_SANDBOX_BIN="$dst/openshell-sandbox"
+  export NEMOCLAW_OPENSHELL_SANDBOX_BIN="/usr/local/bin/openshell-sandbox"
 }
 
 # gateway.env is generated once and keeps whatever supervisor path was current
-# then, so an existing deployment would go on handing the host an unresolvable
-# path. Reconcile it the same way the bind address is reconciled.
+# then. Reconcile it the same way the bind address is reconciled.
 reconcile_supervisor_bin() {
   local want="${NEMOCLAW_OPENSHELL_SANDBOX_BIN:-}" f="${HOME}/.config/openshell/gateway.env" have
   [ -n "$want" ] || return 0
@@ -424,8 +526,36 @@ reconcile_supervisor_bin() {
   else
     printf 'OPENSHELL_DOCKER_SUPERVISOR_BIN=%s\n' "$want" >> "$f"
   fi
-  systemctl --user restart nemoclaw-openshell-gateway.service 2>/dev/null || true
-  sleep 5
+}
+
+# The installer writes ExecStart=/usr/local/bin/openshell-gateway and NemoClaw
+# refuses any other path ("service identity is not a trusted OpenShell
+# gateway"). An earlier revision rewrote that to HOME/bin; put it back. The
+# file at /usr/local/bin is a symlink onto the volume (see publish_shared_binaries).
+reconcile_gateway_unit_bin() {
+  local unit="${HOME}/.config/systemd/user/nemoclaw-openshell-gateway.service"
+  [ -f "$unit" ] || return 0
+  grep -q '/root/bin/openshell-gateway' "$unit" || return 0
+  log "gateway unit ExecStart /root/bin/openshell-gateway -> /usr/local/bin/openshell-gateway"
+  sed -i "s|/root/bin/openshell-gateway|/usr/local/bin/openshell-gateway|g" "$unit"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+
+# Start the unit onboard already registered — not a second copy. Sandbox
+# recover needs :8080 before docker start, or policy fetch fails and the
+# container exits; onboard then tries to recreate and aborts on backup.
+ensure_managed_gateway() {
+  local n=0
+  systemctl --user reset-failed nemoclaw-openshell-gateway.service >/dev/null 2>&1 || true
+  systemctl --user start nemoclaw-openshell-gateway.service >/dev/null 2>&1 || true
+  while [ "$n" -lt 25 ]; do
+    if ss -lnt 2>/dev/null | grep -Eq ':8080[[:space:]]'; then
+      return 0
+    fi
+    sleep 1
+    n=$((n + 1))
+  done
+  return 0
 }
 
 
@@ -459,6 +589,7 @@ if ! command -v nemoclaw >/dev/null || ! command -v openshell >/dev/null; then
   log "installing OpenShell/NemoClaw CLI"
   curl -fsSL https://www.nvidia.com/nemoclaw.sh | \
     NEMOCLAW_AGENT="${AGENT}" \
+    NEMOCLAW_SANDBOX_NAME="${SANDBOX_NAME}" \
     NEMOCLAW_PROVIDER=custom \
     NEMOCLAW_ENDPOINT_URL="${INFERENCE_BASE_URL}" \
     NEMOCLAW_MODEL="${INFERENCE_MODEL}" \
@@ -466,7 +597,7 @@ if ! command -v nemoclaw >/dev/null || ! command -v openshell >/dev/null; then
     NEMOCLAW_PREFERRED_API=openai-completions \
     bash -s -- --yes-i-accept-third-party-software \
     || log "installer returned non-zero; continuing if CLI is on PATH"
-  export PATH="${HOME}/.local/bin:${PATH}"
+  export PATH="${HOME}/bin:${HOME}/.local/bin:${PATH}"
   for nvmbin in "${HOME}"/.nvm/versions/node/*/bin; do
     [ -d "$nvmbin" ] && export PATH="${nvmbin}:${PATH}"
   done
@@ -476,7 +607,7 @@ command -v nemoclaw >/dev/null && command -v openshell >/dev/null \
 
 # These need the OpenShell CLI, so they run only once it is installed.
 clear_errored_sandbox
-publish_shared_binaries || die "could not publish openshell-sandbox to ${HOME}/bin; the host daemon cannot mount it"
+publish_shared_binaries || die "could not publish openshell-sandbox to ${HOME}/bin"
 reconcile_supervisor_bin
 
 # ---- partial gateway PKI ----
@@ -484,10 +615,9 @@ reconcile_supervisor_bin
 # ... some files exist but not all") and never cleans it up, so a run
 # interrupted during certificate generation wedges every later start.
 #
-# The usual cause here is worse than a truncated write: asked to bind-mount a
-# file it cannot resolve on the host, the host Docker daemon creates an empty
-# DIRECTORY at that path. So ca.crt and the client/server leaves can come back
-# as directories, which no amount of regeneration fixes. Move the tree aside
+# A truncated write, or a leftover empty DIRECTORY from the old host-daemon
+# bind-mount behaviour, can leave ca.crt and the client/server leaves as
+# directories, which no amount of regeneration fixes. Move the tree aside
 # (rather than delete it) whenever it is not intact and let the gateway rebuild.
 clear_partial_gateway_pki() {
   local dir="${HOME}/.local/state/nemoclaw/openshell-docker-gateway/tls" f intact=1
@@ -501,14 +631,11 @@ clear_partial_gateway_pki() {
 }
 clear_partial_gateway_pki
 
-# ---- Docker-out-of-Docker debris ----
-# Told to bind-mount a file that does not exist on the host, the host Docker
-# daemon does not fail: it creates an empty DIRECTORY at that path. Each one
-# then poisons the real file forever -- the gateway cannot write sandbox.jwt
-# because a directory already occupies the path, the sandbox logs "failed to
-# read sandbox token from /etc/openshell/auth/sandbox.jwt", and the phase goes
-# to Error. NemoClaw never cleans these up and they persist in the shared /root
-# tree, so one bad run wedges every run after it.
+# ---- empty-directory bind-mount debris ----
+# Told to bind-mount a file that does not exist, dockerd does not fail: it
+# creates an empty DIRECTORY at that path. Each one then poisons the real file
+# -- the gateway cannot write sandbox.jwt because a directory already occupies
+# the path. Keep this for leftover state (including an old DooD volume).
 #
 # rmdir is deliberate: it removes a path only when it is an empty directory, so
 # a real key, certificate or token is never at risk.
@@ -519,12 +646,26 @@ clear_dood_debris() {
                2>/dev/null); do
     rmdir "$d" 2>/dev/null && n=$((n + 1))
   done
-  [ "$n" -gt 0 ] && log "removed ${n} empty directories the host daemon left in place of mount sources"
+  [ "$n" -gt 0 ] && log "removed ${n} empty directories left in place of mount sources"
+  # Failed bind of a missing supervisor binary leaves a directory at this path.
+  for d in /usr/local/bin/openshell-sandbox /usr/local/bin/openshell-gateway; do
+    rmdir "$d" 2>/dev/null || true
+  done
   return 0
 }
 clear_dood_debris
+reconcile_gateway_unit_bin
+ensure_managed_gateway
+recover_stopped_sandbox
 
-if ! openshell -g nemoclaw sandbox list 2>/dev/null | grep "${SANDBOX_NAME}.*Ready" >/dev/null; then
+if ! wait_sandbox_listed_ready; then
+  existing="$(first_ready_sandbox)"
+  if [ -n "$existing" ] && [ "$existing" != "$SANDBOX_NAME" ]; then
+    log "SANDBOX_NAME=${SANDBOX_NAME} is not Ready; using existing Ready sandbox '${existing}'"
+    SANDBOX_NAME="$existing"
+  fi
+fi
+if ! sandbox_is_ready; then
   need_inference
   check_inference_dns
   ensure_sandbox_images
@@ -540,7 +681,13 @@ if ! openshell -g nemoclaw sandbox list 2>/dev/null | grep "${SANDBOX_NAME}.*Rea
     COMPATIBLE_API_KEY="${INFERENCE_API_KEY}" \
     NEMOCLAW_PREFERRED_API=openai-completions \
     "${onboard_cmd[@]}" \
-    || die "onboard failed"
+    || {
+      if sandbox_is_ready; then
+        log "onboard exited non-zero but sandbox '${SANDBOX_NAME}' is Ready; continuing"
+      else
+        die "onboard failed"
+      fi
+    }
 fi
 wait_sandbox_ready || die "sandbox not Ready"
 
@@ -613,6 +760,12 @@ fi
 
 write_openai_env "$CID"
 
+port_is_listening() {
+  local p="$1"
+  ss -lnt 2>/dev/null | grep -Eq ":${p}[[:space:]]" && return 0
+  lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1
+}
+
 ensure() {
   local name="$1" pattern="$2"
   shift 2
@@ -627,16 +780,27 @@ ensure() {
 # (nemoclaw-openshell-gateway.service) and NemoClaw refuses to attach to a
 # listener it cannot prove that unit owns; a second copy started from this
 # script is the bind conflict its source explicitly warns about.
+#
+# OpenShell's own onboard forwards bind 127.0.0.1 and occupy 8642/18789, so
+# `--local 0.0.0.0:…` cannot bind. Those tunnels target the same ports inside
+# the sandbox (8642 for the API, 18789 for the dashboard). Skip creating a
+# second forward when the local port is already listening; run the dashboard
+# on 18789 so the existing tunnel actually hits it (9119 is only used on the
+# bare-metal host path in lib.sh).
 start_all() {
   local openshell
   openshell="$(command -v openshell || true)"
   [ -n "$openshell" ] || return 1
-  ensure dashboard "hermes dashboard --no-open --port 9119" \
-    "$openshell" -g nemoclaw sandbox exec -n "${SANDBOX_NAME}" --no-tty -- hermes dashboard --no-open --port 9119 --skip-build
-  ensure dashboard-forward "forward service ${SANDBOX_NAME} --target-port 9119" \
-    "$openshell" -g nemoclaw forward service "${SANDBOX_NAME}" --target-port 9119 --local "${BIND}:${HERMES_DASHBOARD_PORT}"
-  ensure api-forward "forward service ${SANDBOX_NAME} --target-port 18642" \
-    "$openshell" -g nemoclaw forward service "${SANDBOX_NAME}" --target-port 18642 --local "${BIND}:${HERMES_API_PORT}"
+  ensure dashboard "hermes dashboard --no-open --port ${HERMES_DASHBOARD_PORT}" \
+    "$openshell" -g nemoclaw sandbox exec -n "${SANDBOX_NAME}" --no-tty -- hermes dashboard --no-open --port "${HERMES_DASHBOARD_PORT}" --skip-build
+  if ! port_is_listening "${HERMES_DASHBOARD_PORT}"; then
+    ensure dashboard-forward "forward service ${SANDBOX_NAME} --target-port ${HERMES_DASHBOARD_PORT}" \
+      "$openshell" -g nemoclaw forward service "${SANDBOX_NAME}" --target-port "${HERMES_DASHBOARD_PORT}" --local "${BIND}:${HERMES_DASHBOARD_PORT}"
+  fi
+  if ! port_is_listening "${HERMES_API_PORT}"; then
+    ensure api-forward "forward service ${SANDBOX_NAME} --target-port 18642" \
+      "$openshell" -g nemoclaw forward service "${SANDBOX_NAME}" --target-port 18642 --local "${BIND}:${HERMES_API_PORT}"
+  fi
 }
 
 log "Hermes API  http://${BIND}:${HERMES_API_PORT}/v1"
@@ -652,19 +816,20 @@ ENTRY
 RUN chmod +x /usr/local/sbin/nemohermes
 
 # The workload runs as a system unit, not as PID 1: journal+console puts its
-# output in `docker logs`, and After=user@0.service means it starts only once
-# the user manager that will own the gateway is up.
+# output in `docker logs`. After=docker.service user@0.service means it starts
+# only once inner dockerd and the user manager that will own the gateway are up.
 COPY <<'UNIT' /etc/systemd/system/nemohermes.service
 [Unit]
 Description=NemoHermes bootstrap (onboard, approvals, MCP, forwards)
-After=network-online.target user@0.service
-Wants=network-online.target user@0.service
+After=network-online.target docker.service user@0.service
+Wants=network-online.target docker.service user@0.service
 
 [Service]
 Type=simple
 Environment=HOME=/root
 Environment=USER=root
 Environment=XDG_RUNTIME_DIR=/run/user/0
+Environment=PATH=/root/bin:/root/.local/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/sbin/nemohermes
 Restart=on-failure
 # Sandbox creation holds a mutation lock and can run for tens of minutes. A

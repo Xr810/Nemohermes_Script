@@ -5,20 +5,23 @@
 # The image carries no configuration. Every value comes from .env at container
 # start, so changing the key or the model is `docker compose up -d`, never a
 # rebuild, and no secret is stored in an image layer.
+#
+# Sandboxes are created by an *inner* dockerd (Docker-in-Docker). They do not
+# appear in the host's `docker ps`. State lives in two named volumes so
+# `docker compose down` stops the wrapper and `down -v` wipes it clean.
 
 services:
   nemohermes:
     build: .
     image: nemohermes:local
     container_name: nemohermes
-    network_mode: host
     restart: unless-stopped
 
-    # ---- systemd as PID 1 ----
+    # ---- systemd as PID 1 + inner dockerd ----
     # NemoClaw runs the OpenShell gateway as a systemd user unit and will not
     # attach to a listener it cannot prove that unit owns, so onboard needs a
-    # real init: cgroup write access (privileged) plus tmpfs for the runtime
-    # dirs systemd expects to own.
+    # real init. Inner dockerd also needs cgroup and net admin; unprivileged
+    # DinD is not viable here. Privileged covers both.
     #
     # cgroup v2 host: leave the cgroup namespace private (Docker's default) and
     # let systemd mount its own writable cgroup2 inside it. The old recipe of
@@ -35,7 +38,12 @@ services:
       - /run:size=256m
       - /run/lock:size=8m
     # systemd shuts down on SIGRTMIN+3; the Dockerfile sets STOPSIGNAL to match.
-    stop_grace_period: 45s
+    # Inner dockerd must stop its sandbox containers first.
+    stop_grace_period: 60s
+
+    ports:
+      - "${HERMES_API_PORT:-8642}:${HERMES_API_PORT:-8642}"
+      - "${HERMES_DASHBOARD_PORT:-18789}:${HERMES_DASHBOARD_PORT:-18789}"
 
     # Required on purpose: without .env the container would start with no
     # inference endpoint and only fail minutes later, inside onboard. Compose
@@ -45,28 +53,31 @@ services:
     # Set here, not in .env, so the image always knows it is the compose build.
     environment:
       IN_CONTAINER: "1"
+      # Fallback if OpenShell has not already bound loopback. Published
+      # ports still work when forwards stay on 127.0.0.1: the entrypoint
+      # DNATs eth0 to loopback. Loopback-only host access is a ports bind:
+      # "127.0.0.1:8642:8642".
+      FORWARD_BIND: "0.0.0.0"
 
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # Identical path on BOTH sides, and that is the whole point. NemoClaw
-      # hands the host Docker daemon absolute paths from in here — the sandbox
-      # supervisor binary, the guest TLS bundle — and the daemon resolves them
-      # in the host filesystem. Behind a named volume (or /root) it finds
-      # nothing, silently mounts an empty directory, and every sandbox dies
-      # with: exec ".../openshell-sandbox": is a directory.
-      # It has to be /root specifically: systemd synthesizes root's home as
-      # /root regardless of /etc/passwd, so its user manager looks for the
-      # gateway unit and resolves %E / %S there. Pointing HOME anywhere else
-      # splits the two and onboard fails step 2/8 on unit metadata.
-      # This also persists nemoclaw state and the installed CLI across a
-      # recreate, so the ~107 MB of binaries are downloaded once.
-      - /root:/root
+      # HOME must stay /root: systemd synthesizes root's home as /root
+      # regardless of /etc/passwd, so its user manager looks for the gateway
+      # unit and resolves %E / %S there. CLI, NemoClaw state, and the ~107 MB
+      # of binaries live here so they survive a recreate.
+      - nemohermes-home:/root
+      # Inner overlay2 on a volume, not on the wrapper's overlay filesystem.
+      # Also keeps sandbox images across `compose down` (without -v).
+      - nemohermes-docker:/var/lib/docker
 
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:${HERMES_API_PORT:-8642}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      # First start boots systemd, installs the CLI and creates the sandbox.
+      # First start boots systemd, inner dockerd, installs the CLI and creates
+      # the sandbox.
       start_period: 900s
 
+volumes:
+  nemohermes-home:
+  nemohermes-docker:

@@ -4,8 +4,9 @@ Hermes agent sandbox (NVIDIA OpenShell + NemoClaw). The Docker path exposes the
 Hermes OpenAI-compatible API so **Open WebUI on another device** can connect to
 it. Open WebUI is not installed in the image (old step 3 is skipped for now).
 
-`docker compose up` starts the OpenShell gateway, which creates the Hermes
-sandbox from the host Docker store. Bare-metal `./deploy.sh` on Ubuntu is still
+`docker compose up` starts a privileged wrapper whose inner dockerd runs the
+OpenShell gateway and creates the Hermes sandbox. Those sandbox containers do
+not appear in the host's `docker ps`. Bare-metal `./deploy.sh` on Ubuntu is still
 supported, including optional step 3 if you want WebUI on the same host later.
 
 ## Requirements
@@ -13,7 +14,7 @@ supported, including optional step 3 if you want WebUI on the same host later.
 | Item | Docker (`docker compose up`) | Bare-metal `./deploy.sh` |
 |---|---|---|
 | OS | Docker Engine, Docker Desktop, or OrbStack | Ubuntu 24.04 |
-| Privileges | `privileged: true`, `network_mode: host`, and bind mounts of `/var/run/docker.sock` and the host's `/root` — see [How the container works](#how-the-container-works) | `sudo` for packages |
+| Privileges | `privileged: true` (systemd + inner dockerd). No host `docker.sock`, no bind of the host's `/root` — see [How the container works](#how-the-container-works) | `sudo` for packages |
 | Commands | `docker` and `docker compose` | `bash` and `ssh`. Step 1 installs `git`, `curl`, `binutils`, `zstd`, `lsof` |
 | Network | `nvidia.com` (CLI install on first run) and your inference endpoint | same, plus PyPI/GitHub if you run step 3 |
 | Inference | OpenAI-compatible base URL + model name + API key | same |
@@ -64,16 +65,18 @@ in an image layer and `nemohermes:local` is safe to `docker save` and copy to
 another machine (see `release/`). Compose refuses to start without `.env`
 rather than failing minutes later inside onboard.
 
-Onboard uses a host Docker image when it is already present, and pulls from
-GHCR when it is missing.
+Onboard uses an image already in the *inner* Docker store when present, and
+pulls from GHCR when it is missing. Host Docker images are not reused.
 
 | Interface | Address |
 |---|---|
 | Hermes API (OpenAI-compatible) | `http://<this-host-ip>:8642/v1` (health at `/health`) |
 | Hermes dashboard | `http://<this-host-ip>:18789/` |
 
-Forwards bind `0.0.0.0` by default so another machine on the LAN can reach them.
-Set `FORWARD_BIND=127.0.0.1` in `.env` if you want loopback only.
+OpenShell's forwards bind `127.0.0.1` inside the wrapper. Compose publishes
+those ports on the host; the entrypoint DNATs eth0 traffic onto loopback. To
+restrict the API to this machine, change the compose `ports` bind, for example
+`127.0.0.1:8642:8642`.
 
 ### Connect Open WebUI on another device
 
@@ -94,9 +97,22 @@ key. Do not expose `8642` to the public internet without TLS.
 
 ```bash
 docker compose logs -f
-docker compose down             # stop; host images and nemohermes-home stay
-docker compose down -v          # wipe wrapper state (sandbox containers on the host remain)
+docker compose down             # stop the wrapper; named volumes (CLI, sandbox images) stay
+docker compose down -v          # wipe nemohermes-home and nemohermes-docker
 ```
+
+### Migrating from the old host-socket layout
+
+If you previously ran this compose with `/var/run/docker.sock` and `/root:/root`:
+
+1. `docker compose down` (do **not** `rm -rf` the host's `/root`).
+2. Remove leftover sandbox containers on the **host** Docker engine:
+   `docker ps -a --filter 'label=openshell.ai/sandbox-name'` then `docker rm -f` those IDs.
+3. Optionally delete only NemoClaw leftovers under the host's `/root` (`.nemoclaw`,
+   `.local/state/nemoclaw`, `.local/state/openshell`, `bin/openshell-*`). Leave the
+   rest of `/root` alone.
+4. `docker compose up -d --build`. Named volumes start empty, so the first DinD
+   start installs the CLI and pulls sandbox images again.
 
 `.env` is gitignored and excluded from the build context, so the inference key
 never reaches an image layer or `release/nemohermes-local.tar`. Keep `.env`
@@ -106,8 +122,8 @@ template.
 ## How the container works
 
 Worth reading before deploying: the image is not an ordinary sandboxed
-container, and three of its requirements look alarming until you know why they
-are there.
+container. It is Docker-in-Docker: systemd as PID 1, plus an inner dockerd that
+creates the Hermes sandbox as a *child* of this wrapper.
 
 ### systemd runs as PID 1
 
@@ -117,46 +133,43 @@ accepts only `systemd-system` and `systemd-user` as supervisor kinds, and the
 "standalone fallback" it mentions on a systemd-less host aborts onboarding at
 step 2/8. So the image installs systemd, runs it as PID 1, and pre-enables
 lingering so root's user manager comes up without a login. The deployment
-itself runs as `nemohermes.service`, whose output goes to `docker logs`.
+itself runs as `nemohermes.service`, whose output goes to `docker logs`. Inner
+`docker.service` is enabled in the image (not masked) so dockerd starts under
+the same systemd.
 
-Consequences: `privileged: true` (systemd needs to write cgroups), tmpfs for
-`/run` and `/run/lock`, and `STOPSIGNAL SIGRTMIN+3`. The cgroup namespace stays
-**private** — this is a cgroup v2 host, so systemd mounts its own cgroup2 tree.
-The old `cgroup: host` plus a read-write bind of the host `/sys/fs/cgroup` is a
-cgroup v1 recipe and would hand this systemd the host's entire cgroup tree.
+Consequences: `privileged: true` (systemd and inner dockerd need cgroups and
+net admin), tmpfs for `/run` and `/run/lock`, and `STOPSIGNAL SIGRTMIN+3`. The
+cgroup namespace stays **private** — this is a cgroup v2 host, so systemd
+mounts its own cgroup2 tree. The old `cgroup: host` plus a read-write bind of
+the host `/sys/fs/cgroup` is a cgroup v1 recipe and would hand this systemd the
+host's entire cgroup tree.
 
 `/tmp` is deliberately **not** tmpfs. Docker's tmpfs defaults are `noexec` and
 `size=64m`; the OpenShell installer unpacks there and gates installation on
 `[ -x $tmpdir/openshell-gateway ]`, which `noexec` makes false — and 64 MB
 cannot hold the 67 MB gateway binary anyway.
 
-### Sandboxes are siblings, not children
+### Sandboxes are children, not siblings
 
-The container talks to the **host** Docker engine through the mounted socket,
-so sandbox containers are created next to this one, not inside it. That is what
-makes the image thin, and it is also the source of its sharpest constraint:
+The wrapper runs its own dockerd. NemoClaw talks to `/var/run/docker.sock`
+*inside* the container; that socket is not the host's. Sandbox containers
+therefore show up in `docker compose exec nemohermes docker ps`, not in the
+host's `docker ps`.
 
-> Every absolute path NemoClaw hands to the host daemon is resolved in the
-> **host** filesystem, not in this container.
+NemoClaw still hands dockerd absolute paths under `HOME` (the supervisor
+binary, the guest TLS bundle). Because the inner daemon and those files share
+one filesystem, a named volume at `/root` is enough — there is no host bind of
+`/root`. `HOME` must still be `/root`: systemd synthesizes root's home as
+`/root` and ignores `/etc/passwd` for it, so `%h`, `%E`, `%S` and the unit
+search path stay there no matter what `HOME` says.
 
-The gateway bind-mounts the sandbox supervisor binary and the guest TLS bundle
-into each sandbox. Asked for a path it cannot resolve, the host daemon does not
-fail — it silently creates an **empty directory** there. The sandbox then dies
-with `exec: "/opt/openshell/bin/openshell-sandbox": is a directory`, and the
-empty directory it left behind poisons every later run.
+A second named volume at `/var/lib/docker` holds inner images and containers
+so overlay2 is not stacked on the wrapper's overlay filesystem, and so
+`docker compose down` (without `-v`) can skip the installer and image pull on
+the next `up`. `down -v` removes both volumes.
 
-The fix is path identity: `/root` is bind-mounted from the host at the same
-path, and `HOME=/root`. It has to be `/root` specifically — systemd carries a
-synthesized user record for root with the home directory hardcoded to `/root`
-and ignores `/etc/passwd` for it, so its user manager resolves `%h`, `%E`, `%S`
-and its unit search path there no matter what `HOME` says. Point `HOME`
-anywhere else and the gateway unit lands where systemd will not look, and
-onboard fails with `service identity query returned invalid metadata`.
-
-**This means the container writes NemoClaw state into the host's real `/root`.**
-Given that it is already privileged and holds the Docker socket, this is not a
-meaningful additional concession — but the isolation is weaker than "container"
-suggests. On a shared machine, prefer the bare-metal path below.
+The wrapper is still privileged. Isolation here means "does not use the host
+Docker engine or the host's `/root`", not "an unprivileged sandbox".
 
 ### The gateway is reachable, not exposed
 
@@ -176,9 +189,10 @@ iptables -t nat -A PREROUTING -d <bridge-gw> -p tcp --dport 8080 \
 ```
 
 Binding `0.0.0.0` would have put the gateway on every interface including the
-LAN; this exposes it to exactly the one subnet that has to reach it. Because
-the container shares the host network namespace, the rule lands in the host's
-tables.
+LAN; this exposes it to exactly the one subnet that has to reach it. The rule
+lands in the wrapper's netns, next to the inner dockerd (compose does not use
+host networking). Hermes API `:8642` and dashboard `:18789` are published with
+`ports:`.
 
 ### Self-healing on start
 
@@ -190,10 +204,14 @@ deployment:
 | Leftover | Symptom it causes | Handling |
 |---|---|---|
 | Lifecycle locks from a dead container | `Timed out waiting for the sandbox mutation lock (owner pid N)` | Dropped when the PID namespace differs or no process owns the pid; a live owner is left alone |
-| Empty directories the host daemon created | `failed to read sandbox token`, `... is a directory` | `rmdir` — which only ever removes an *empty* directory, so real keys and tokens cannot be touched |
+| Empty directories dockerd created for missing bind sources | `failed to read sandbox token`, `... is a directory` | `rmdir` — which only ever removes an *empty* directory, so real keys and tokens cannot be touched |
 | Half-written gateway PKI | `partial PKI state ... some files exist but not all` | Moved aside so the gateway regenerates |
 | Sandbox stuck in `Error` phase | Next onboard aborts with `already exists as OpenClaw` | Deleted; `Ready` and `Running` sandboxes are never touched |
 | `gateway.env` generated once, never revisited | Stale supervisor path or bind address forever | Reconciled against the declared values |
+
+The NVIDIA installer, image pull, and `nemoclaw onboard` run only when their
+outputs are missing (no CLI on PATH, no Ready sandbox). Later `compose restart`
+or `down`/`up` without `-v` skip that work and only re-bind the API forwards.
 
 GPU passthrough is decided from the hardware: without a usable `nvidia-smi`,
 `NEMOCLAW_SANDBOX_GPU=0` is set, because the Docker GPU compatibility patch
@@ -447,10 +465,10 @@ supported path; remote mode exists for deploying from a second machine.
 | `does not resolve` | Wrong endpoint hostname, or no network access to it |
 | `Missing required inference config` | URL, model, and API key must all be set |
 | `Failed to install prerequisites` | `apt-get` could not reach its mirrors; fix networking or install `git curl binutils zstd lsof` by hand, then re-run |
-| `docker daemon not usable` | Still failing after a reboot: `newgrp docker`, then re-run. Compose image: `docker compose logs` and `/var/log/gateway.log` inside the container |
+| `docker daemon not usable` | Still failing after a reboot: `newgrp docker`, then re-run. Compose image: `docker compose logs` and `systemctl status docker` inside the container |
 | `Still missing after install` | `source ~/.bashrc` or `export PATH="$HOME/.local/bin:$PATH"`, then re-run |
-| Compose container restarts / docker.sock denied | The image must mount the host Docker socket. On Linux/OrbStack, `network_mode: host` is required so the gateway can create the sandbox |
-| Other device cannot reach `:8642` | Use this machine's LAN IP (not `127.0.0.1`); `FORWARD_BIND` must be `0.0.0.0`; allow the port on the host firewall |
+| Compose container restarts / inner docker never ready | `docker compose exec nemohermes systemctl status docker`. Overlay errors usually mean `/var/lib/docker` is not on the named volume |
+| Other device cannot reach `:8642` | Use this machine's LAN IP (not `127.0.0.1`); published ports require the process to listen on `0.0.0.0` (compose sets `FORWARD_BIND`); allow the port on the host firewall |
 | Open WebUI install produces no output | Ubuntu step 3 only; it is downloading; expect up to an hour on a slow link |
 | Container stuck restarting after step 2 | Config drift. Step 2 rolls back automatically; check `nemoclaw <sandbox> logs --tail 50` |
 | Open WebUI will not start | `journalctl --user -u je-open-webui -n 40` |
@@ -461,8 +479,8 @@ supported path; remote mode exists for deploying from a second machine.
 
 | Path | Contents |
 |---|---|
-| `Dockerfile` | The only Docker definition: packages, systemd as PID 1, and the bootstrap script it runs (onboard, approvals, MCP, forwards, and the reconciliation described above). Holds no configuration and no secrets. Open WebUI is not baked in |
-| `docker-compose.yml` | How to run that image: privileged, host network, host Docker socket, and the `/root` bind mount that gives host and container the same paths |
+| `Dockerfile` | The only Docker definition: packages, systemd as PID 1, inner dockerd, and the bootstrap script it runs (onboard, approvals, MCP, forwards, and the reconciliation described above). Holds no configuration and no secrets. Open WebUI is not baked in |
+| `docker-compose.yml` | How to run that image: privileged, published ports, named volumes at `/root` and `/var/lib/docker`. No host `docker.sock`, no host `/root` bind |
 | `.env` / `.env.example` | All runtime configuration for the container path. `.env` is gitignored and excluded from the build context |
 | `scripts/package-image.sh` | Builds and saves the image for offline transfer |
 | `release/` | The offline bundle: image tar, image-only compose file, `.env.example` |

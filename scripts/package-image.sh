@@ -44,4 +44,5 @@ echo "  cp .env.example .env    # set INFERENCE_API_KEY"
 echo "  docker compose up -d"
 echo
 echo "Note: the image holds no secrets; the key lives in .env on the target."
-echo "Note: the target Docker must already have the Hermes/OpenShell sandbox images."
+echo "Note: sandbox images are pulled by the inner dockerd on first up; they are"
+echo "      not in this tar and need not be pre-loaded on the host."

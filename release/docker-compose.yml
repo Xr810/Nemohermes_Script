@@ -6,14 +6,22 @@
 #   docker compose up -d
 #
 # The tar carries no secrets — the key lives only in .env on the target.
+# Sandboxes are created by the inner dockerd; they do not appear in the host's
+# `docker ps`. The first `up` still pulls sandbox images into the named volume.
 
 services:
   nemohermes:
     image: nemohermes:local
     container_name: nemohermes
-    network_mode: host
     restart: unless-stopped
-    stop_grace_period: 30s
+    privileged: true
+    tmpfs:
+      - /run:size=256m
+      - /run/lock:size=8m
+    stop_grace_period: 60s
+    ports:
+      - "${HERMES_API_PORT:-8642}:${HERMES_API_PORT:-8642}"
+      - "${HERMES_DASHBOARD_PORT:-18789}:${HERMES_DASHBOARD_PORT:-18789}"
     # Required on purpose: without .env the container would start with no
     # inference endpoint and only fail minutes later, inside onboard. Compose
     # instead refuses immediately with "env file ... not found".
@@ -22,16 +30,19 @@ services:
     # Set here, not in .env, so the image always knows it is the compose build.
     environment:
       IN_CONTAINER: "1"
+      FORWARD_BIND: "0.0.0.0"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - nemohermes-home:/root
+      - nemohermes-docker:/var/lib/docker
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:${HERMES_API_PORT:-8642}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      # First start installs the CLI and creates the sandbox; that is slow.
+      # First start boots systemd, inner dockerd, installs the CLI and creates
+      # the sandbox.
       start_period: 900s
 
 volumes:
   nemohermes-home:
+  nemohermes-docker:

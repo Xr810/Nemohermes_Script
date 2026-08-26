@@ -125,10 +125,11 @@ port.
 If the page will not load, check the forward unit first — the app is usually
 running and only the tunnel died.
 
-**Compose image:** no Open WebUI. The container uses the host Docker socket
-(`network_mode: host`). Onboard starts the OpenShell gateway, which creates the
-sandbox, then forwards Hermes API `:8642` and dashboard `:18789`. Restart with
-`docker compose restart`. Connection file:
+**Compose image:** no Open WebUI. The wrapper runs an inner dockerd (no host
+socket, no host-network mode). Onboard starts the OpenShell gateway, which
+creates the sandbox inside that engine, then forwards Hermes API `:8642` and
+dashboard `:18789` via published ports. Restart with `docker compose restart`.
+List sandboxes with `docker compose exec nemohermes docker ps`. Connection file:
 
 ```bash
 docker compose exec nemohermes cat /root/hermes-openai.env
@@ -327,7 +328,10 @@ openshell -g nemoclaw sandbox list              # sandbox state
 nemoclaw <sandbox> doctor                       # sandbox and gateway health
 nemoclaw <sandbox> logs --tail 50               # sandbox / Hermes logs
 journalctl --user -u je-open-webui -n 50        # Open WebUI logs
+# Ubuntu host:
 docker ps -a --filter 'label=openshell.ai/sandbox-name=<sandbox>'
+# Compose (inner dockerd):
+docker compose exec nemohermes docker ps -a --filter 'label=openshell.ai/sandbox-name=<sandbox>'
 ```
 
 A container in `restarting` state almost always means config drift.

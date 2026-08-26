@@ -21,5 +21,6 @@ The image carries no configuration and no secrets, so the tar is safe to copy
 around; the inference key lives only in `.env` on the target and can be changed
 without rebuilding or re-transferring anything.
 
-The target needs Docker and the Hermes/OpenShell sandbox images already present
-(onboard does not pull).
+The tar is the wrapper image only. On first `up`, the inner dockerd pulls the
+Hermes/OpenShell sandbox images into the `nemohermes-docker` volume; they do
+not need to be present on the host Docker store.
