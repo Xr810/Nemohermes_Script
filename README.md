@@ -1,36 +1,41 @@
 # NemoHermes Deploy
 
-Ubuntu 24.04 上的 Hermes 沙箱部署脚本（NVIDIA OpenShell + NemoClaw）。
+Scripted deployment of a Hermes agent sandbox (NVIDIA OpenShell + NemoClaw)
+on a single Ubuntu 24.04 host.
 
-整包入口是 `./deploy.sh`。五个步骤各自是独立脚本，可以单独再跑，也可以只拿走某一个（连同它依赖的文件）用在别的机器上。
+The package entry point is `./deploy.sh`. Each of the five steps is its own
+script: you can re-run one, or take one (plus the files it depends on) to
+another machine.
 
-| 你想做的事 | 跑这个 |
+| Goal | Run |
 |---|---|
-| 全新机器，一次装完（不含 Open WebUI） | `./deploy.sh` |
-| 只装基础设施 + 沙箱 + Hermes API | `./01-infra.sh` |
-| 只改审批模式 | `./02-hermes.sh` |
-| 只装 Open WebUI | `./03-openwebui.sh` |
-| 只接 MCP Router | `./04-mcp.sh` |
-| 只做检查，不改任何东西 | `./05-verify.sh` |
+| Fresh host, full install (no Open WebUI) | `./deploy.sh` |
+| Infra + sandbox + Hermes API only | `./01-infra.sh` |
+| Change approval mode only | `./02-hermes.sh` |
+| Install Open WebUI only | `./03-openwebui.sh` |
+| Attach MCP Router only | `./04-mcp.sh` |
+| Checks only, change nothing | `./05-verify.sh` |
 
-Open WebUI 默认不装。需要时再跑步骤 3。
+Open WebUI is off by default. Run step 3 when you want it.
 
 ## Requirements
 
 | Item | Requirement |
 |---|---|
 | OS | Ubuntu 24.04 |
-| Privileges | `sudo`（步骤 1 装系统包时用） |
-| Commands | `bash`。步骤 1 自己会装 `git`、`curl`、`binutils`、`zstd`、`lsof` |
-| Network | `nvidia.com`、GitHub/GHCR，以及推理接口；跑步骤 3 时还要 PyPI |
-| Inference | OpenAI 兼容的 base URL + 模型名 + API key |
-| MCP（可选） | 公网 HTTPS 的 MCP Router URL + token |
+| Privileges | `sudo` (step 1 uses it to install packages) |
+| Commands | `bash`. Step 1 installs `git`, `curl`, `binutils`, `zstd`, `lsof` |
+| Network | `nvidia.com`, GitHub/GHCR, and your inference endpoint; PyPI as well if you run step 3 |
+| Inference | OpenAI-compatible base URL + model name + API key |
+| MCP (optional) | Public HTTPS MCP Router URL + token |
 
-推理地址必须走真实 DNS。本机代理的 fake-ip（Surge/Clash，`198.18.x.x`）会让 onboard 探测失败，脚本会直接停并说明原因。
+The inference endpoint must resolve over real DNS. A local proxy in fake-ip
+mode (Surge/Clash, `198.18.x.x`) makes the onboard probe fail; the scripts
+detect this and stop with an explanation.
 
 ## Quick start
 
-把整个文件夹拷到目标 Linux 上再跑：
+Copy the folder to the target Linux host and run it there:
 
 ```bash
 scp -r Nemohermes_Script/ user@server:~/
@@ -39,294 +44,353 @@ cd ~/Nemohermes_Script
 ./deploy.sh
 ```
 
-全新机器第一次会停下来让你 reboot（见 [Reboot](#reboot-first-run-only)）。重启后再跑一次 `./deploy.sh`。
+On a fresh machine the first run stops once and asks you to reboot (see
+[Reboot](#reboot-first-run-only)). After rebooting, run `./deploy.sh` again.
 
-成功时最后一步打印 `0 failed`。Hermes API 在 `http://127.0.0.1:8642/v1`。之后若要装 Open WebUI：
+When everything succeeds the last step prints `0 failed`. Hermes API is at
+`http://127.0.0.1:8642/v1`. To install Open WebUI later:
 
 ```bash
 ./deploy.sh 03
-# 或直接
+# or
 ./03-openwebui.sh
 ```
 
 ---
 
-## 单独跑某一个脚本
+## Running a single script
 
-每个 `0N-*.sh` 都会 `source lib.sh` 再读 `config.env` / `secrets.env`。**不能只拷一个编号脚本过去。**
+Every `0N-*.sh` sources `lib.sh` and then reads `config.env` / `secrets.env`.
+**Do not copy a numbered script on its own.**
 
-无论跑哪一步，同目录至少要有：
+Whatever step you run, the same directory must contain at least:
 
-| 文件 | 为什么 |
+| File | Why |
 |---|---|
-| `lib.sh` | 日志、向导辅助函数、沙箱操作、systemd 转发 |
-| `config.env` | 沙箱名、推理地址、模型、MCP URL、端口 |
-| `secrets.env` | API key 和 MCP token（向导会写；也可手写，mode 600） |
+| `lib.sh` | Logging, wizard helpers, sandbox helpers, systemd forwards |
+| `config.env` | Sandbox name, inference URL, model, MCP URL, ports |
+| `secrets.env` | API key and MCP token (the wizard writes this; you can also create it by hand, mode 600) |
 
-步骤 3 另外需要整个 `resources/` 目录。
+Step 3 also needs the whole `resources/` directory.
 
-`./deploy.sh` 会先跑配置向导。直接跑 `./01-infra.sh` 等**不会**弹向导，所以单独跑之前先填好 `config.env` 和 `secrets.env`，或先跑一次：
+`./deploy.sh` runs the configuration wizard first. Running `./01-infra.sh`
+directly **does not**. Fill `config.env` and `secrets.env` first, or:
 
 ```bash
-./deploy.sh --skip-config 01    # 向导跳过，只跑步骤 1
-./deploy.sh --skip-config 04    # 只跑步骤 4
-./01-infra.sh                   # 等价：直接调脚本
+./deploy.sh --skip-config 01    # skip wizard, run step 1 only
+./deploy.sh --skip-config 04    # step 4 only
+./01-infra.sh                   # equivalent: call the script
 ./04-mcp.sh
 ```
 
-`deploy.sh` 带步骤号时，**只跑你列出的那些**，不会自动补跑前后步骤。例如 `./deploy.sh 04` 不会先跑 01。
+When `deploy.sh` is given step numbers, it runs **only those steps**. It does
+not fill in earlier ones. `./deploy.sh 04` will not run 01 first.
 
 ---
 
-## 每个文件做什么
+## What each file does
 
-### `deploy.sh` — 向导 + 按顺序调度
+### `deploy.sh` — wizard and dispatcher
 
-默认跑 1 → 2 → 4 → 5，**跳过 3**。
+Default sequence is 1 → 2 → 4 → 5, **skipping 3**.
 
 ```bash
 ./deploy.sh                  # 1, 2, 4, 5
-./deploy.sh --skip-approvals # 不跑步骤 2
-./deploy.sh --skip-mcp       # 不跑步骤 4
-./deploy.sh --skip-config    # 不弹向导，用当前 config.env
-./deploy.sh 01               # 只跑步骤 1
-./deploy.sh 01 04            # 只跑 1 和 4
-./deploy.sh 03               # 只跑 Open WebUI
+./deploy.sh --skip-approvals # skip step 2
+./deploy.sh --skip-mcp       # skip step 4
+./deploy.sh --skip-config    # no wizard; use current config.env
+./deploy.sh 01               # step 1 only
+./deploy.sh 01 04            # steps 1 and 4
+./deploy.sh 03               # Open WebUI only
 ./deploy.sh --help
 ```
 
-向导问 7 项（推理 URL / 模型 / API key / MCP URL / MCP token / 审批模式 / 沙箱名）。1、2、4、6、7 写回 `config.env`；API key 和 MCP token 写到 `secrets.env`（gitignore，mode 600），这样强制 reboot 之后不用再贴一遍。
+The wizard asks seven questions (inference URL / model / API key / MCP URL /
+MCP token / approval mode / sandbox name). Items 1, 2, 4, 6, 7 are written
+back to `config.env`. The API key and MCP token go to `secrets.env`
+(gitignored, mode 600) so the mandatory first-run reboot does not ask for them
+again.
 
-不要把 base URL 指到 `https://inference.local/v1`，那个名字只存在于沙箱内部。
+Do not point the base URL at `https://inference.local/v1`. That name exists
+only inside the sandbox.
 
-### `01-infra.sh` — 装 Docker / OpenShell / NemoClaw，创建沙箱，露出 Hermes API
+### `01-infra.sh` — Docker, OpenShell, NemoClaw, sandbox, Hermes API
 
-**做什么**
+**What it does**
 
-1. 检查推理 DNS（拒绝 fake-ip）和 URL / 模型 / API key 是否齐全
-2. 缺组件时用 `sudo apt-get` 装 `git curl binutils zstd lsof`
-3. 缺 `docker` / `openshell` / `nemoclaw` 时跑 NVIDIA 官方安装器（`https://www.nvidia.com/nemoclaw.sh`）
-4. 沙箱还不是 Ready 时执行 `nemoclaw onboard`（默认不 `--fresh`，本地已有镜像就复用）
-5. 装 systemd user unit：Hermes API `:8642`、dashboard `:18789`
+1. Check inference DNS (reject fake-ip) and that URL / model / API key are set
+2. If components are missing, `sudo apt-get install git curl binutils zstd lsof`
+3. If `docker` / `openshell` / `nemoclaw` are missing, run the NVIDIA installer
+   (`https://www.nvidia.com/nemoclaw.sh`)
+4. If the sandbox is not Ready, run `nemoclaw onboard` (no `--fresh` unless
+   `ONBOARD_FRESH=1`; a local image is reused when present)
+5. Install systemd user units: Hermes API `:8642`, dashboard `:18789`
 
-**单独怎么用**
+**How to run it alone**
 
 ```bash
-# config.env 里要有 SANDBOX_NAME、INFERENCE_BASE_URL、INFERENCE_MODEL
-# secrets.env 里要有 INFERENCE_API_KEY
+# config.env must have SANDBOX_NAME, INFERENCE_BASE_URL, INFERENCE_MODEL
+# secrets.env must have INFERENCE_API_KEY
 ./01-infra.sh
 ```
 
-第一次装 Docker 后，用户 systemd 还拿不到新的 `docker` 组，脚本会停下来让你 reboot，然后再跑一次。第二次会跳过安装器，从 onboard 继续。
+After the first Docker install, user systemd does not yet have the `docker`
+group. The script stops and asks you to reboot, then run it again. The second
+run skips the installer and continues at onboard.
 
-跑完之后：Hermes API `http://127.0.0.1:8642/v1`，dashboard `http://127.0.0.1:18789/`。其它设备要访问，用 SSH 转发，见 [Access points](#access-points)。
+When it finishes: Hermes API `http://127.0.0.1:8642/v1`, dashboard
+`http://127.0.0.1:18789/`. To reach them from another device, use SSH
+forwarding — see [Access points](#access-points).
 
-这是最慢的一步。可以单独拿到一台空 Ubuntu 上当「最小 Hermes」。
+This is the slow step. It is enough on its own for a minimal Hermes host.
 
-### `02-hermes.sh` — 改 `approvals.mode` 并重锚 config hash
+### `02-hermes.sh` — set `approvals.mode` and re-anchor the config hash
 
-**做什么**
+**What it does**
 
-把 Hermes 的 `approvals.mode` 设成 `config.env` 里的 `APPROVALS_MODE`（`off` / `smart` / `manual`）。改 `config.yaml` 后必须同步 `/sandbox/.hermes/.config-hash`，否则容器会 `HERMES_MCP_CONFIG_DRIFT` 重启循环。脚本会备份、写入、重锚、重启验证，失败则回滚。
+Sets Hermes `approvals.mode` to `APPROVALS_MODE` in `config.env`
+(`off` / `smart` / `manual`). After writing `config.yaml` it must sync
+`/sandbox/.hermes/.config-hash`, or the container enters a
+`HERMES_MCP_CONFIG_DRIFT` restart loop. The script backs up, writes, re-anchors,
+restarts to verify, and rolls back on failure.
 
-`APPROVALS_MODE` 为空则直接跳过。
+Empty `APPROVALS_MODE` skips the step.
 
-**单独怎么用**
+**How to run it alone**
 
 ```bash
-# 前提：步骤 1 已完成，沙箱 Ready
-# 改 config.env 里的 APPROVALS_MODE，然后：
+# Prerequisite: step 1 done, sandbox Ready
+# Edit APPROVALS_MODE in config.env, then:
 ./02-hermes.sh
 ```
 
-以后只想改审批、不想重装，就只跑这一份。手改沙箱里的 `config.yaml` 是错的，用这个脚本或 `openshell inference set`。细节见 [OPERATIONS.md](OPERATIONS.md#approval-mode)。
+Use this when you only want to change approvals. Do not edit `config.yaml`
+inside the sandbox by hand — use this script or `openshell inference set`.
+See [OPERATIONS.md](OPERATIONS.md#approval-mode).
 
-### `03-openwebui.sh` — 在沙箱里装 Open WebUI（可选）
+### `03-openwebui.sh` — install Open WebUI inside the sandbox (optional)
 
-**做什么**
+**What it does**
 
-把 Open WebUI 0.9.5 装进**同一个沙箱**（聊天上传和 Hermes 读的是同一块盘）：拷 `resources/`、装依赖、品牌资源、systemd unit（`:3000`）、等管理员账号、导入 `hermes_source_files` 过滤器。
+Installs Open WebUI 0.9.5 **inside the same sandbox** (chat uploads and Hermes
+read the same disk): copies `resources/`, installs dependencies, applies
+branding, writes systemd units (`:3000`), waits for an admin, imports the
+`hermes_source_files` filter.
 
-再跑一遍**不会清库**。要空白实例就自己删 `/sandbox/open-webui/data/webui.db`（以及 WAL/SHM）。
+Re-running **does not wipe the database**. For a blank instance, delete
+`/sandbox/open-webui/data/webui.db` (and the WAL/SHM files) yourself.
 
-**单独怎么用**
+**How to run it alone**
 
 ```bash
-# 前提：步骤 1 已完成
-# 同目录必须有 resources/
+# Prerequisite: step 1 done
+# resources/ must be in the same directory
 ./03-openwebui.sh
 ```
 
-无头建管理员：环境变量或 `secrets.env` 里设 `WEBUI_ADMIN_EMAIL` + `WEBUI_ADMIN_PASSWORD`。没设则第一次打开是「创建管理员」页，脚本最多等 `ADMIN_WAIT_SECS`（默认 600 秒）。
+Headless admin: set `WEBUI_ADMIN_EMAIL` and `WEBUI_ADMIN_PASSWORD` in the
+environment or `secrets.env`. If they are unset, the first visit is the
+"create admin" page and the script waits up to `ADMIN_WAIT_SECS`
+(default 600 seconds).
 
-浏览器不在这台 Linux 上时：
+If the browser is not on this Linux host:
 
 ```bash
 ssh -L 127.0.0.1:3000:127.0.0.1:3000 user@server
 ```
 
-这一步在差网络上可能要一个小时，期间几乎没输出，是在下 Open WebUI。上传行为和品牌见下面两节。
+On a slow link this step can take an hour with little output — that is the
+download. Upload behaviour and branding are below.
 
-### `04-mcp.sh` — 给沙箱接 MCP Router
+### `04-mcp.sh` — attach an MCP Router to the sandbox
 
-**做什么**
+**What it does**
 
-用 `nemoclaw <sandbox> mcp add mcp-router` 注册公网 HTTPS MCP。token 留在宿主机 OpenShell，不写进沙箱 `config.yaml`（否则会 drift，也会绕过网关的凭据注入）。已注册则跳过 add，但仍做 probe / tool discovery。
+Registers a public HTTPS MCP server with
+`nemoclaw <sandbox> mcp add mcp-router`. The token stays in host-side
+OpenShell; it is not written into sandbox `config.yaml` (that would drift
+and skip gateway credential injection). If already registered, add is skipped
+but probe / tool discovery still run.
 
-`MCP_URL` 为空则直接退出 0。
+Empty `MCP_URL` exits 0.
 
-**单独怎么用**
+**How to run it alone**
 
 ```bash
-# 前提：步骤 1 已完成
+# Prerequisite: step 1 done
 # config.env: MCP_URL=https://.../mcp
-# secrets.env 或环境变量: MCP_ROUTER_TOKEN（原始 token，不要 Bearer 前缀）
+# secrets.env or environment: MCP_ROUTER_TOKEN (raw token, no Bearer prefix)
 ./04-mcp.sh
 ```
 
-token 缺失时脚本会现场问一次。已经有 Hermes、只是后来才要接 MCP 时，只跑这一份即可。
+If the token is missing, the script prompts for it. Use this when Hermes is
+already up and you want MCP later.
 
-### `05-verify.sh` — 只读检查
+### `05-verify.sh` — read-only checks
 
-**做什么**
+**What it does**
 
-不改任何状态。检查：沙箱 Ready、`nemoclaw doctor`、Hermes 版本、`approvals.mode`、API `/health`。若装过 Open WebUI 再查它的 unit / 管理员 / 过滤器。配了 MCP 再查 tool discovery。有失败则非零退出。
+Changes nothing. Checks: sandbox Ready, `nemoclaw doctor`, Hermes version,
+`approvals.mode`, API `/health`. If Open WebUI is installed, also its units /
+admin / filter. If MCP is configured, tool discovery. Non-zero exit on any
+failure.
 
-**单独怎么用**
+**How to run it alone**
 
 ```bash
 ./05-verify.sh
-# 或
+# or
 ./deploy.sh --skip-config 05
 ```
 
-随时可跑。品牌是否贴上不在检查范围内，看页面即可。
+Safe to run at any time. Branding is not checked — look at the page.
 
-### 其它文件（编号脚本都依赖它们）
+### Supporting files (every numbered script needs these)
 
-| 文件 | 作用 |
+| File | Role |
 |---|---|
-| `lib.sh` | 被上面所有脚本 `source`。不要单独执行 |
-| `config.env` | 非密钥配置。向导会改；单独跑脚本前也可以手改 |
-| `secrets.env` | `INFERENCE_API_KEY`、`MCP_ROUTER_TOKEN`；gitignore |
-| `resources/` | 步骤 3 用：空白库、install/start、过滤器、品牌图、沙箱 Dockerfile（host 脚本不用它，镜像来自 NVIDIA 安装器） |
-| `OPERATIONS.md` | 装完之后：换模型、MCP、日志、排障 |
+| `lib.sh` | `source`d by every script above. Do not execute it |
+| `config.env` | Non-secret config. The wizard edits it; you can also edit it before a standalone run |
+| `secrets.env` | `INFERENCE_API_KEY`, `MCP_ROUTER_TOKEN`; gitignored |
+| `resources/` | Step 3: blank database, install/start, filter, branding, sandbox Dockerfile (host scripts do not use it; the image comes from the NVIDIA installer) |
+| `OPERATIONS.md` | Day two: change model, MCP, logs, troubleshooting |
 
 ---
 
-## Reboot（仅第一次）
+## Reboot (first run only)
 
-NVIDIA 安装器会把用户加进 `docker` 组，但已经在跑的 user systemd 不会拿到新组，网关就访问不了 `/var/run/docker.sock`。脚本会停在：
+The NVIDIA installer adds your user to the `docker` group, but the already
+running user systemd manager never picks up new groups, so the managed
+gateway cannot reach `/var/run/docker.sock`. The script stops with:
 
 ```text
 [ERR ] User systemd manager (pid ...) lacks the docker group (gid ...)
   Fix: reboot the machine once ... then rerun ./deploy.sh
 ```
 
-重启后再跑 `./deploy.sh` 或 `./01-infra.sh`。第二次跳过安装器，复用 `secrets.env` 里的 key。
+Reboot, then run `./deploy.sh` or `./01-infra.sh` again. The second run skips
+the installer and reuses the key in `secrets.env`.
 
-| 环境 | 怎么 reboot |
+| Environment | How to reboot |
 |---|---|
-| 普通服务器 | `sudo reboot`，再 SSH 进去 |
-| OrbStack | `orbctl restart -m <vm>`，然后 `orbctl run -m <vm>` |
-| Hyper-V | 在管理器里重启 Ubuntu VM |
+| Plain server | `sudo reboot`, then SSH back in |
+| OrbStack | `orbctl restart -m <vm>`, then `orbctl run -m <vm>` |
+| Hyper-V | Restart the Ubuntu VM from the manager |
 
-机器上本来就能用 Docker 时不会出现这一步。
+This step does not appear if Docker was already installed and your user
+already had working Docker access.
 
-## File uploads（步骤 3 装上的过滤器）
+## File uploads (filter installed by step 3)
 
-**用户 → Hermes。** 聊天里直接附的文件会拷到一次性目录，整份交给 Hermes，而不是切成 RAG 切片。之后拷贝和 Open WebUI 上传记录会删掉。知识库仍走 RAG。
+**User → Hermes.** A file attached directly to a chat is copied to an
+ephemeral directory and handed to Hermes whole, instead of being chunked
+for retrieval. The copy and the Open WebUI upload record are removed
+afterwards. Knowledge collections stay on RAG.
 
-**Hermes → 用户。** 需要可下载文件时，Hermes 必须写到过滤器放进 system prompt 的目录（`/tmp/je-hermes-outgoing/...`）。过滤器登记后可通过 `/api/v1/files/{id}/content?attachment=true` 下载。`data/uploads` 里每个用户最多留 20 个或 3 天。不要只打印沙箱路径。
+**Hermes → user.** When the user asks for a downloadable file, Hermes must
+write it into the outgoing directory the filter puts in the system prompt
+(`/tmp/je-hermes-outgoing/...`). The filter registers it so you can download
+it via `/api/v1/files/{id}/content?attachment=true`. Copies in `data/uploads`
+are kept for 20 files or 3 days per user. Do not only print a sandbox path.
 
-Open WebUI **0.9.5** 新对话第一轮可能不跑 filter outlet，刷新后回复链接也可能消失。文件仍在 Workspace → Files。本包固定 0.9.5。
+On Open WebUI **0.9.5**, a new chat's first turn may not run the filter outlet,
+and reply links can vanish after a reload. The file remains in Workspace →
+Files. This package stays on 0.9.5.
 
-文本 Hermes 自己读，图片走 vision。PDF 被当成二进制，所以 `hermes_source_tool.py` 先渲成图（`install.sh` 会装 `pypdfium2`）。三个文件都在 `/sandbox/open-webui/`。
+Hermes reads text-like files itself and analyses images with its vision tool.
+PDFs are treated as binary, so `hermes_source_tool.py` renders pages to
+images first (`install.sh` installs `pypdfium2`). All three files live in
+`/sandbox/open-webui/`.
 
 ## Branding
 
-步骤 3 在两处贴 Johnson Electric 品牌：
+Step 3 applies Johnson Electric branding in two places:
 
-| 什么 | 来源 | 怎么换 |
+| What | Source | How to change |
 |---|---|---|
-| 界面产品名 | `resources/start.sh` 里的 `WEBUI_NAME` | 改 `start.sh`，再跑步骤 3 |
-| 图标 / 启动图 / 头像 | `company-icon.png` / `company-logo.png`，由 `apply-webui-branding.sh` 覆盖 | 换 PNG，再跑步骤 3 |
+| Product name in the UI | `WEBUI_NAME` in `resources/start.sh` | Edit `start.sh`, re-run step 3 |
+| Favicon, splash, avatars | `company-icon.png` / `company-logo.png`, applied by `apply-webui-branding.sh` | Replace the PNGs, re-run step 3 |
 
-资源缺失或拷贝失败不会让部署失败，界面会保持 Open WebUI 原样。覆盖发生在 `pip install` 之后。不重装、只换图：见 [OPERATIONS.md](OPERATIONS.md#branding)。
+Missing assets or a failed copy do not fail the deployment; the UI keeps
+stock Open WebUI artwork. The overlay runs after `pip install`. To change
+artwork without reinstalling, see [OPERATIONS.md](OPERATIONS.md#branding).
 
 ## Access points
 
-都绑在部署机的 loopback。步骤 1 用 systemd 接管 Hermes 的两个转发（onboard 自带的转发会随网关一起死）。Open WebUI 由步骤 3 加上。
+All of these bind loopback on the deployment host. Step 1 owns the Hermes
+forwards as systemd units (onboard's own forwards die with the gateway).
+Open WebUI is added by step 3.
 
-| 界面 | 地址 |
+| Interface | Address |
 |---|---|
-| Hermes API | `http://127.0.0.1:8642/v1`，健康检查 `/health` |
+| Hermes API | `http://127.0.0.1:8642/v1`, health at `/health` |
 | Hermes dashboard | `http://127.0.0.1:18789/` |
-| Open WebUI | `http://127.0.0.1:3000`（跑过步骤 3 之后） |
+| Open WebUI | `http://127.0.0.1:3000` (after step 3) |
 | OpenShell TUI | `openshell term` |
 
-从别的机器访问：
+From another machine:
 
 ```bash
 ssh -L 127.0.0.1:8642:127.0.0.1:8642 -L 127.0.0.1:18789:127.0.0.1:18789 user@server
 ```
 
-各界面干什么见 [OPERATIONS.md](OPERATIONS.md)。
+What each surface is for: [OPERATIONS.md](OPERATIONS.md).
 
 ## Configuration reference
 
-`config.env` 只放非密钥。
+`config.env` holds non-secret values only.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SANDBOX_NAME` | — | onboard 创建的沙箱名；必填 |
-| `AGENT` | `hermes` | 运行时；保持即可 |
-| `INFERENCE_BASE_URL` | — | OpenAI 兼容地址；必填 |
-| `INFERENCE_MODEL` | — | 默认模型；必填 |
-| `INFERENCE_API_KEY` | 来自 `secrets.env` | 不写进 `config.env` |
-| `APPROVALS_MODE` | `manual` | `off` / `smart` / `manual`；空则跳过步骤 2 |
-| `MCP_URL` | 空 | 公网 HTTPS MCP；空则跳过步骤 4 |
-| `MCP_ENV_VAR` | `MCP_ROUTER_TOKEN` | 凭据**变量名**，不是 token 本身 |
-| `WEBUI_PORT` | `3000` | 沙箱内 Open WebUI 端口。`resources/start.sh` 写死了 3000，要改就两处一起改 |
-| `WEBUI_LOCAL_PORT` | `3000` | 宿主机转发端口；空则不转发 |
-| `FORWARD_BIND` | `127.0.0.1` | 宿主机转发监听地址 |
-| `SANDBOX_WAIT_SECS` | `120` | 等沙箱 Ready |
-| `ADMIN_WAIT_SECS` | `600` | 等浏览器创建管理员 |
-| `FORWARD_PORTS` | `8642 …` | 预留；没有步骤读它 |
-| `DOCKERFILE` | `resources/Dockerfile` | 预留；沙箱镜像来自安装器 |
+| `SANDBOX_NAME` | — | Sandbox created by onboard; required |
+| `AGENT` | `hermes` | Agent runtime; keep as is |
+| `INFERENCE_BASE_URL` | — | OpenAI-compatible endpoint; required |
+| `INFERENCE_MODEL` | — | Default model; required |
+| `INFERENCE_API_KEY` | from `secrets.env` | Not written to `config.env` |
+| `APPROVALS_MODE` | `manual` | `off` / `smart` / `manual`; empty skips step 2 |
+| `MCP_URL` | empty | Public HTTPS MCP; empty skips step 4 |
+| `MCP_ENV_VAR` | `MCP_ROUTER_TOKEN` | Credential **variable name**, not the token |
+| `WEBUI_PORT` | `3000` | Open WebUI port inside the sandbox. `resources/start.sh` hardcodes 3000; change both or neither |
+| `WEBUI_LOCAL_PORT` | `3000` | Host forward port; empty disables the forward |
+| `FORWARD_BIND` | `127.0.0.1` | Address the host-side forwards bind |
+| `SANDBOX_WAIT_SECS` | `120` | How long to wait for the sandbox to be Ready |
+| `ADMIN_WAIT_SECS` | `600` | How long to wait for the browser admin |
+| `FORWARD_PORTS` | `8642 …` | Reserved; no step reads it |
+| `DOCKERFILE` | `resources/Dockerfile` | Reserved; the sandbox image comes from the installer |
 
-`OPENWEBUI_*` 是指向 `resources/` 的路径，换资源时才需要动。
+`OPENWEBUI_*` are paths into `resources/`. Touch them only to swap an asset.
 
-脚本还会认这些环境变量：
+Environment variables the scripts honour:
 
 | Variable | Effect |
 |---|---|
-| `INFERENCE_API_KEY` | 向导第 3 项预填；也从 `secrets.env` 读 |
-| `MCP_ROUTER_TOKEN` | 向导第 5 项预填；也从 `secrets.env` 读 |
-| `WEBUI_ADMIN_EMAIL` / `WEBUI_ADMIN_PASSWORD` | 步骤 3 无头建管理员 |
-| `FORWARD_BIND` | 覆盖转发监听地址 |
-| `ONBOARD_FRESH=1` | 步骤 1 的 onboard 加 `--fresh` |
-| `REMOTE_HOST` | 命令改走 SSH 打到那台机器 |
-| `UNIT_DIR` / `LIBEXEC_DIR` | 覆盖 systemd unit 和 helper 目录 |
+| `INFERENCE_API_KEY` | Pre-fills wizard item 3; also loaded from `secrets.env` |
+| `MCP_ROUTER_TOKEN` | Pre-fills wizard item 5; also loaded from `secrets.env` |
+| `WEBUI_ADMIN_EMAIL` / `WEBUI_ADMIN_PASSWORD` | Headless first-admin creation in step 3 |
+| `FORWARD_BIND` | Override the forward bind address |
+| `ONBOARD_FRESH=1` | Step 1 onboard adds `--fresh` |
+| `REMOTE_HOST` | Run every command over SSH against that host |
+| `UNIT_DIR` / `LIBEXEC_DIR` | Override systemd unit and helper directories |
 
-在目标机上直接跑脚本（不设 `REMOTE_HOST`）是支持的用法。
+Running the scripts directly on the target host (`REMOTE_HOST` unset) is
+the supported path.
 
 ## Troubleshooting
 
-| 现象 | 怎么办 |
+| Symptom | Action |
 |---|---|
-| 要 sudo 密码 | 正常；步骤 1 装包 |
-| `User systemd manager ... lacks the docker group` | 全新机预期行为。reboot 后再跑 `./01-infra.sh` 或 `./deploy.sh` |
-| `resolves to fake-ip 198.18.x.x` | 本机代理劫持了 DNS。断开或给这个域名开直连 |
-| `does not resolve` | 地址写错，或到不了那个主机 |
-| `Missing required inference config` | URL、模型、API key 都要有 |
-| `Failed to install prerequisites` | `apt-get` 到不了源；修好网络或手装 `git curl binutils zstd lsof` 再跑 |
-| `docker daemon not usable` | reboot 后仍不行：`newgrp docker` 再跑 |
-| `Still missing after install` | `source ~/.bashrc` 或 `export PATH="$HOME/.local/bin:$PATH"` 再跑 |
-| Open WebUI 没输出 | 在下载；慢网络可能要一小时 |
-| 步骤 2 后容器一直 restart | config drift。脚本会自动回滚；看 `nemoclaw <sandbox> logs --tail 50` |
-| Open WebUI 起不来 | `journalctl --user -u je-open-webui -n 40` |
-| 界面还是原版 Open WebUI 图 | 品牌覆盖被跳过；见 [OPERATIONS.md](OPERATIONS.md#branding) |
-| 验证失败 | 对着失败项重跑对应脚本，再 `./05-verify.sh` |
+| Prompted for a sudo password | Expected; step 1 installs packages |
+| `User systemd manager ... lacks the docker group` | Expected on a fresh host. Reboot, then re-run `./01-infra.sh` or `./deploy.sh` |
+| `resolves to fake-ip 198.18.x.x` | A local proxy is hijacking DNS. Disconnect it or exempt the domain |
+| `does not resolve` | Wrong endpoint hostname, or no network access to it |
+| `Missing required inference config` | URL, model, and API key must all be set |
+| `Failed to install prerequisites` | `apt-get` could not reach its mirrors; fix networking or install `git curl binutils zstd lsof` by hand, then re-run |
+| `docker daemon not usable` | Still failing after a reboot: `newgrp docker`, then re-run |
+| `Still missing after install` | `source ~/.bashrc` or `export PATH="$HOME/.local/bin:$PATH"`, then re-run |
+| Open WebUI produces no output | It is downloading; expect up to an hour on a slow link |
+| Container stuck restarting after step 2 | Config drift. The script rolls back; check `nemoclaw <sandbox> logs --tail 50` |
+| Open WebUI will not start | `journalctl --user -u je-open-webui -n 40` |
+| UI still shows stock Open WebUI artwork | Branding overlay was skipped; see [OPERATIONS.md](OPERATIONS.md#branding) |
+| Verification reports failures | Re-run the step it points at, then `./05-verify.sh` |
 
-装完之后换模型、改 MCP、看日志：[OPERATIONS.md](OPERATIONS.md)。
+Day-two operations (change model, MCP, logs): [OPERATIONS.md](OPERATIONS.md).
