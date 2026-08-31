@@ -46,12 +46,8 @@ check_inference_dns() {
 # ---- Preflight: user systemd must have the docker group ----
 # Installer adds docker group after this manager started; it never picks up
 # new groups. Gateway then cannot reach docker.sock. Fail fast (reboot to fix).
-# Skipped in the compose image (root + inner dockerd, lingering user@0) and
-# when docker is already usable from this process.
+# Skipped when docker is already usable from this process.
 check_user_manager_docker_group() {
-  if in_container; then
-    return 0
-  fi
   if docker info >/dev/null 2>&1; then
     return 0
   fi

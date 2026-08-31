@@ -1,8 +1,8 @@
 """
 title: Hermes Source Files
 author: local
-version: 1.3.3
-description: Hand direct chat uploads to Hermes through ephemeral copies while leaving knowledge collections persistent on RAG.
+version: 1.4.1
+description: Hand direct chat uploads to Hermes through ephemeral copies, register Hermes outgoing files into Workspace Files, and leave knowledge collections persistent on RAG.
 """
 
 from __future__ import annotations
@@ -11,7 +11,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 from pathlib import Path
+import re
 import shutil
 import time
 from typing import Optional
@@ -19,7 +21,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from open_webui.models.files import Files
+from open_webui.models.chats import Chats
+from open_webui.models.files import FileForm, Files
 from open_webui.models.knowledge import Knowledges
 from open_webui.models.users import Users
 from open_webui.retrieval.vector.async_client import ASYNC_VECTOR_DB_CLIENT
@@ -32,6 +35,8 @@ OPEN_WEBUI_ROOT = Path("/sandbox/open-webui").resolve()
 UPLOAD_ROOT = (OPEN_WEBUI_ROOT / "data" / "uploads").resolve()
 PDF_ADAPTER = OPEN_WEBUI_ROOT / "hermes_source_tool.py"
 EPHEMERAL_ROOT = Path("/tmp/je-hermes-chat-files").resolve()
+OUTGOING_ROOT = Path("/tmp/je-hermes-outgoing").resolve()
+OUTGOING_MARKER = "<!-- je-hermes-outgoing -->"
 log = logging.getLogger(__name__)
 
 READ_FILE_SUFFIXES = {
@@ -90,6 +95,57 @@ def _native_tool(path: Path, content_type: Optional[str]) -> str:
     return "terminal_or_available_Hermes_tool"
 
 
+def _safe_segment(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "")
+    return (cleaned.strip("._-") or "no-chat")[:80]
+
+
+def _is_hermes_outgoing(file) -> bool:
+    meta = file.meta if isinstance(getattr(file, "meta", None), dict) else {}
+    return bool(meta.get("hermes_outgoing"))
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.0f} MiB"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.0f} KiB"
+    return f"{num_bytes} bytes"
+
+
+def _outgoing_markdown(registered: list[dict], notes: list[str]) -> str:
+    lines = [OUTGOING_MARKER, "", "Files from Hermes:"]
+    for item in registered:
+        name = item["name"]
+        file_id = item["id"]
+        lines.append(f"- [{name}](/api/v1/files/{file_id}/content?attachment=true)")
+        if item.get("is_image"):
+            lines.append(f"  ![{name}](/api/v1/files/{file_id}/content)")
+    for note in notes:
+        lines.append(f"- _{note}_")
+    return "\n".join(lines)
+
+
+def _append_block_to_text(content: object, block: str) -> str:
+    text = content if isinstance(content, str) else ""
+    if OUTGOING_MARKER in text:
+        return text
+    if not text.strip():
+        return block
+    return text.rstrip() + "\n\n" + block
+
+
+def _append_block_to_messages(messages: object, block: str) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            message["content"] = _append_block_to_text(message.get("content"), block)
+            return True
+    return False
+
+
 class Filter:
     class Valves(BaseModel):
         priority: int = Field(default=-10, description="Run before ordinary prompt filters.")
@@ -103,6 +159,33 @@ class Filter:
             ge=300,
             le=86400,
             description="Delete abandoned ephemeral source copies after this many seconds.",
+        )
+        enable_outgoing: bool = Field(
+            default=True,
+            description="Register files Hermes writes to the outgoing directory into Workspace Files.",
+        )
+        max_outgoing_files: int = Field(
+            default=8,
+            ge=1,
+            le=50,
+            description="Maximum outgoing files harvested per request.",
+        )
+        max_outgoing_bytes: int = Field(
+            default=50 * 1024 * 1024,
+            ge=1024,
+            description="Maximum size in bytes of a single outgoing file.",
+        )
+        outgoing_retain_files: int = Field(
+            default=20,
+            ge=1,
+            le=200,
+            description="Keep only this many Hermes outgoing files per user; older ones are deleted.",
+        )
+        outgoing_retain_seconds: int = Field(
+            default=3 * 24 * 3600,
+            ge=300,
+            le=30 * 24 * 3600,
+            description="Delete Hermes outgoing files older than this many seconds.",
         )
 
     def __init__(self):
@@ -209,12 +292,246 @@ class Filter:
         return target.resolve()
 
     @staticmethod
+    def _outgoing_dir(user_id: str, identity: tuple[str, str, str]) -> Path:
+        _uid, chat_id, session_id = identity
+        segment = _safe_segment(chat_id or session_id or "no-chat")
+        return (OUTGOING_ROOT / _safe_segment(user_id) / segment).resolve()
+
+    @classmethod
+    def _outgoing_dirs_to_scan(cls, user_id: str, identity: tuple[str, str, str]) -> list[Path]:
+        """Include first-turn dirs so leftovers are found after chat_id appears."""
+        uid, chat_id, session_id = identity
+        seen: set[Path] = set()
+        directories: list[Path] = []
+
+        def add(candidate_identity: tuple[str, str, str]) -> None:
+            path = cls._outgoing_dir(user_id, candidate_identity)
+            if path not in seen:
+                seen.add(path)
+                directories.append(path)
+
+        add(identity)
+        if chat_id:
+            add((uid, "", session_id))
+            add((uid, "", ""))
+        return directories
+
+    @staticmethod
+    def _ensure_outgoing_dir(directory: Path) -> Path:
+        if not _is_within(directory, OUTGOING_ROOT) and directory != OUTGOING_ROOT:
+            raise RuntimeError(f"Refusing to create outgoing directory outside {OUTGOING_ROOT}")
+        OUTGOING_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return directory
+
+    @staticmethod
+    def _prune_stale_outgoing(max_age_seconds: int) -> None:
+        if not OUTGOING_ROOT.is_dir():
+            return
+        cutoff = time.time() - max_age_seconds
+        for user_dir in OUTGOING_ROOT.iterdir():
+            if not user_dir.is_dir() or not _is_within(user_dir.resolve(), OUTGOING_ROOT):
+                continue
+            for candidate in user_dir.iterdir():
+                try:
+                    resolved = candidate.resolve()
+                    if (
+                        candidate.is_dir()
+                        and _is_within(resolved, OUTGOING_ROOT)
+                        and candidate.stat().st_mtime < cutoff
+                    ):
+                        shutil.rmtree(resolved)
+                except OSError:
+                    log.warning("Could not prune stale Hermes outgoing %s", candidate, exc_info=True)
+            try:
+                if user_dir.is_dir() and not any(user_dir.iterdir()):
+                    user_dir.rmdir()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _list_outgoing_files(directory: Path) -> list[Path]:
+        if not directory.is_dir() or not _is_within(directory.resolve(), OUTGOING_ROOT):
+            return []
+        files: list[Path] = []
+        for candidate in sorted(directory.iterdir()):
+            if not candidate.is_file() or candidate.name.startswith("."):
+                continue
+            resolved = candidate.resolve()
+            if not _is_within(resolved, directory.resolve()):
+                continue
+            files.append(resolved)
+        return files
+
+    @staticmethod
+    def _upload_outgoing_file(path: Path, storage_name: str) -> tuple[bytes, str]:
+        with path.open("rb") as handle:
+            return Storage.upload_file(handle, storage_name, {"source": "hermes_outgoing"})
+
+    async def _register_outgoing_file(self, user_id: str, path: Path) -> dict:
+        name = path.name
+        size = path.stat().st_size
+        file_id = str(uuid.uuid4())
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        storage_name = f"{file_id}_{name}"
+        contents, stored_path = await asyncio.to_thread(self._upload_outgoing_file, path, storage_name)
+        row = await Files.insert_new_file(
+            user_id,
+            FileForm(
+                id=file_id,
+                hash=hashlib.sha256(contents).hexdigest(),
+                filename=name,
+                path=stored_path,
+                data={},
+                meta={
+                    "name": name,
+                    "content_type": content_type,
+                    "size": size,
+                    "hermes_outgoing": True,
+                },
+            ),
+        )
+        if not row:
+            raise RuntimeError(f"Could not insert Open WebUI file record for {name}")
+        return {
+            "name": name,
+            "id": file_id,
+            "content_type": content_type,
+            "is_image": path.suffix.lower() in IMAGE_SUFFIXES or content_type.startswith("image/"),
+        }
+
+    async def _harvest_outgoing(
+        self, user_id: str, identity: tuple[str, str, str]
+    ) -> tuple[list[dict], list[str]]:
+        registered: list[dict] = []
+        notes: list[str] = []
+        if not self.valves.enable_outgoing:
+            return registered, notes
+
+        pending: list[Path] = []
+        for directory in self._outgoing_dirs_to_scan(user_id, identity):
+            pending.extend(await asyncio.to_thread(self._list_outgoing_files, directory))
+
+        max_files = self.valves.max_outgoing_files
+        max_bytes = self.valves.max_outgoing_bytes
+        for path in pending:
+            name = path.name
+            try:
+                size = path.stat().st_size
+            except OSError:
+                notes.append(f"Skipped {name}: could not read file")
+                continue
+            if size <= 0:
+                notes.append(f"Skipped {name}: empty file")
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            if size > max_bytes:
+                notes.append(f"Skipped {name}: larger than {_format_size(max_bytes)}")
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                continue
+            if len(registered) >= max_files:
+                notes.append(f"Skipped {name}: more than {max_files} outgoing files")
+                continue
+            try:
+                registered.append(await self._register_outgoing_file(user_id, path))
+                path.unlink()
+            except Exception:
+                log.warning("Could not harvest Hermes outgoing file %s", path, exc_info=True)
+                notes.append(f"Skipped {name}: could not register in Files")
+
+        for directory in self._outgoing_dirs_to_scan(user_id, identity):
+            try:
+                if directory.is_dir() and not any(directory.iterdir()) and directory != OUTGOING_ROOT:
+                    directory.rmdir()
+            except OSError:
+                pass
+        return registered, notes
+
+    async def _append_outgoing_to_chat(self, user_id: str, chat_id: str, block: str) -> None:
+        if not chat_id or chat_id.startswith("local:") or chat_id.startswith("channel:"):
+            return
+        chat = await Chats.get_chat_by_id_and_user_id(chat_id, user_id)
+        if not chat or not isinstance(chat.chat, dict):
+            return
+        history = chat.chat.get("history") if isinstance(chat.chat.get("history"), dict) else {}
+        messages = history.get("messages") if isinstance(history.get("messages"), dict) else {}
+        target_id = str(history.get("currentId") or "")
+        target = messages.get(target_id) if target_id else None
+        if not (isinstance(target, dict) and target.get("role") == "assistant"):
+            best_id = ""
+            best_ts = -1
+            for message_id, message in messages.items():
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                try:
+                    timestamp = int(message.get("timestamp") or 0)
+                except (TypeError, ValueError):
+                    timestamp = 0
+                if timestamp >= best_ts:
+                    best_ts = timestamp
+                    best_id = str(message_id)
+            target_id = best_id
+            target = messages.get(target_id) if target_id else None
+        if not target_id or not isinstance(target, dict):
+            return
+        new_content = _append_block_to_text(target.get("content"), block)
+        if new_content == target.get("content"):
+            return
+        await Chats.upsert_message_to_chat_by_id_and_message_id(
+            chat_id,
+            target_id,
+            {"content": new_content},
+        )
+
+    def _add_system_prompt(self, body: dict, prompt: str) -> None:
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            body["messages"] = add_or_update_system_message(prompt, messages, append=True)
+
+    def _add_outgoing_prompt(self, body: dict, outgoing_dir: Optional[Path]) -> None:
+        if outgoing_dir is None:
+            return
+        prompt = f"""
+When the user explicitly asked for a downloadable file, write the FINAL file into this directory using the
+intended filename (not a temporary name):
+{outgoing_dir}
+Do not write into the inbound ephemeral directory under /tmp/je-hermes-chat-files. Do not only report a
+sandbox path — the chat UI cannot download that. Use a common image suffix (.png, .jpg, .jpeg, .webp, .gif)
+so the file can be shown inline. After writing, continue your reply in ordinary text; download links are
+added automatically. If the user did not ask for a file, do not write anything into that directory.
+""".strip()
+        self._add_system_prompt(body, prompt)
+
+    async def _prepare_outgoing_inlet(
+        self,
+        user_id: str,
+        identity: tuple[str, str, str],
+    ) -> Optional[Path]:
+        if not self.valves.enable_outgoing:
+            return None
+        await asyncio.to_thread(self._prune_stale_outgoing, self.valves.stale_handoff_seconds)
+        registered, notes = await self._harvest_outgoing(user_id, identity)
+        if registered or notes:
+            await self._append_outgoing_to_chat(
+                user_id, identity[1], _outgoing_markdown(registered, notes)
+            )
+        await self._prune_stored_outgoing(user_id)
+        outgoing_dir = self._outgoing_dir(user_id, identity)
+        await asyncio.to_thread(self._ensure_outgoing_dir, outgoing_dir)
+        return outgoing_dir
+
+    @staticmethod
     async def _delete_direct_upload(file) -> None:
         """Remove one non-knowledge upload through Open WebUI's storage layers."""
         knowledges = await Knowledges.get_knowledges_by_file_id(file.id)
         if knowledges:
             raise RuntimeError(f"Refusing to delete knowledge-linked file {file.id}")
-
         deleted = await Files.delete_file_by_id(file.id)
         if not deleted:
             raise RuntimeError(f"Could not delete Open WebUI file record {file.id}")
@@ -229,9 +546,31 @@ class Filter:
         for file in await Files.get_files_by_user_id(user_id):
             if file.id in protected_ids:
                 continue
+            if _is_hermes_outgoing(file):
+                continue
             if await Knowledges.get_knowledges_by_file_id(file.id):
                 continue
             await cls._delete_direct_upload(file)
+
+    async def _prune_stored_outgoing(self, user_id: str) -> None:
+        """Drop old Hermes outgoing copies so data/uploads cannot grow without bound."""
+        keep_n = self.valves.outgoing_retain_files
+        cutoff = int(time.time()) - self.valves.outgoing_retain_seconds
+        outgoing = [
+            file
+            for file in await Files.get_files_by_user_id(user_id)
+            if _is_hermes_outgoing(file)
+        ]
+        outgoing.sort(key=lambda file: int(file.created_at or 0), reverse=True)
+        for index, file in enumerate(outgoing):
+            too_old = int(file.created_at or 0) < cutoff
+            over_cap = index >= keep_n
+            if not too_old and not over_cap:
+                continue
+            try:
+                await self._delete_direct_upload(file)
+            except Exception:
+                log.warning("Could not prune stored Hermes outgoing file %s", file.id, exc_info=True)
 
     async def inlet(
         self,
@@ -246,6 +585,7 @@ class Filter:
 
         await asyncio.to_thread(self._prune_stale_handoffs, self.valves.stale_handoff_seconds)
         identity = self._request_identity(user_id, body, __metadata__)
+        outgoing_dir = await self._prepare_outgoing_inlet(user_id, identity)
         # Open WebUI 0.9.5 never runs the outlet for requests without a
         # chat_id (new-chat first messages), so staged copies would leak.
         # Remove this identity's handoffs from any PREVIOUS request here:
@@ -280,6 +620,8 @@ class Filter:
             # A knowledge-base file is persistent and must remain on the RAG
             # path even if a client represents it as a file item.
             if await Knowledges.get_knowledges_by_file_id(file_id):
+                continue
+            if _is_hermes_outgoing(file):
                 continue
             direct_file_ids.add(file_id)
             if not file.path:
@@ -344,9 +686,8 @@ another tool to discover or read files under /sandbox/open-webui/data/uploads. P
 are not implicit conversation attachments. Use only knowledge context explicitly supplied by Open WebUI or
 files explicitly listed as authorized source files in the current request.
 """.strip()
-            messages = body.get("messages")
-            if isinstance(messages, list):
-                body["messages"] = add_or_update_system_message(no_attachment_prompt, messages, append=True)
+            self._add_system_prompt(body, no_attachment_prompt)
+            self._add_outgoing_prompt(body, outgoing_dir)
             return body
 
         if not selected:
@@ -356,9 +697,8 @@ Open WebUI attachment RAG/full-context has been disabled for those files. Do not
 their contents from a file name, prior assistant text, or previously extracted context. State clearly that the
 original file could not be inspected and ask the user to reattach it or correct access.
 """.strip()
-            messages = body.get("messages")
-            if isinstance(messages, list):
-                body["messages"] = add_or_update_system_message(failure_prompt, messages, append=True)
+            self._add_system_prompt(body, failure_prompt)
+            self._add_outgoing_prompt(body, outgoing_dir)
             return body
 
         requirement = (
@@ -391,9 +731,8 @@ stop and say that the original file was not inspected; do not infer an answer fr
 name, or previously extracted context. Access only the listed paths and do not reveal internal paths unless
 explicitly requested.
 """.strip()
-        messages = body.get("messages")
-        if isinstance(messages, list):
-            body["messages"] = add_or_update_system_message(prompt, messages, append=True)
+        self._add_system_prompt(body, prompt)
+        self._add_outgoing_prompt(body, outgoing_dir)
         return body
 
     async def outlet(
@@ -414,6 +753,14 @@ explicitly requested.
         # done by scanning the filesystem for this identity's handoffs; the
         # inlet also does the same at the start of the next request.
         identity = self._request_identity(user_id, body, __metadata__)
+        if self.valves.enable_outgoing:
+            registered, notes = await self._harvest_outgoing(user_id, identity)
+            if registered or notes:
+                block = _outgoing_markdown(registered, notes)
+                _append_block_to_messages(body.get("messages"), block)
+                await self._append_outgoing_to_chat(user_id, identity[1], block)
+            await self._prune_stored_outgoing(user_id)
+
         await asyncio.to_thread(self._remove_identity_handoffs, identity)
 
         self._pending_handoffs.pop(identity, set())

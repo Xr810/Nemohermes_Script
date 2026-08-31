@@ -47,13 +47,8 @@ fi
 
 # 5. Hermes API (step 3 / Open WebUI is skipped by default)
 API_PORT="${HERMES_API_PORT:-8642}"
-if in_container; then
-  API_FWD="$(pgrep -cf "forward service ${SANDBOX_NAME} --target-port 18642" 2>/dev/null || true)"
-  check "Hermes API forward process" "$API_FWD"
-else
-  API_ENABLED="$(systemctl --user is-enabled je-hermes-api-forward.service 2>/dev/null || true)"
-  check "je-hermes-api-forward enabled" "$( [ "$API_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
-fi
+API_ENABLED="$(systemctl --user is-enabled je-hermes-api-forward.service 2>/dev/null || true)"
+check "je-hermes-api-forward enabled" "$( [ "$API_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
 HEALTH="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || echo 000)"
 check "Hermes API /health (${HEALTH})" "$( [ "$HEALTH" = "200" ] && echo 1 || echo 0 )"
 
@@ -65,20 +60,11 @@ fi
 if [ "$WEBUI_INSTALLED" != "1" ]; then
   log_info "Open WebUI not installed (step 3 skipped)"
 else
-  if in_container; then
-    WEBUI_PROC="$(pgrep -cf 'sandbox exec .*start\.sh' 2>/dev/null || true)"
-    check "Open WebUI process" "$WEBUI_PROC"
-    if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
-      FWD_PROC="$(pgrep -cf "forward service ${SANDBOX_NAME} --target-port ${WEBUI_PORT:-3000}" 2>/dev/null || true)"
-      check "Open WebUI forward process" "$FWD_PROC"
-    fi
-  else
-    WEBUI_ENABLED="$(systemctl --user is-enabled je-open-webui.service 2>/dev/null || true)"
-    check "je-open-webui enabled" "$( [ "$WEBUI_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
-    if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
-      FWD_ENABLED="$(systemctl --user is-enabled je-open-webui-forward.service 2>/dev/null || true)"
-      check "je-open-webui-forward enabled" "$( [ "$FWD_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
-    fi
+  WEBUI_ENABLED="$(systemctl --user is-enabled je-open-webui.service 2>/dev/null || true)"
+  check "je-open-webui enabled" "$( [ "$WEBUI_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
+  if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
+    FWD_ENABLED="$(systemctl --user is-enabled je-open-webui-forward.service 2>/dev/null || true)"
+    check "je-open-webui-forward enabled" "$( [ "$FWD_ENABLED" = "enabled" ] && echo 1 || echo 0 )"
   fi
 
   WEBUI_URL="http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
@@ -123,11 +109,7 @@ echo
 echo "━━━ Verification result: ${PASS} passed, ${FAIL} failed ━━━"
 if [ "$FAIL" -gt 0 ]; then
   log_err "Failures found. See README.md (Troubleshooting); logs: nemoclaw ${SANDBOX_NAME} logs --tail 50"
-  if in_container; then
-    log_err "Container logs: /var/log/gateway.log /var/log/api-forward.log"
-  else
-    log_err "journalctl --user -u je-hermes-api-forward -n 40"
-  fi
+  log_err "journalctl --user -u je-hermes-api-forward -n 40"
   exit 1
 else
   log_ok "All passed! Deployment complete."

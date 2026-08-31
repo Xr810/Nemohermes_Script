@@ -1,9 +1,6 @@
 .DS_Store
 secrets.env
 secrets.env.tmp.*
-.env
 __pycache__/
-release/*.tar
-release/*.tar.gz
 *.db-wal
 *.db-shm

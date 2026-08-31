@@ -4,12 +4,13 @@
 #
 # Usage: ./03-openwebui.sh
 #
-# Ubuntu / ./deploy.sh only. The Docker image does not run this step — it
-# exposes the Hermes API for Open WebUI on another device instead.
+# Opt-in via ./deploy.sh 03. Open WebUI is installed inside the sandbox so uploads
+# land on the same disk Hermes reads.
 #
-# Installs a blank database (resources/open-webui-fresh.db), so the first visit
-# shows the "create admin" screen; step 3.5 polls for that account and then
-# imports the filter. Re-running this step discards existing WebUI users.
+# Headless: WEBUI_ADMIN_EMAIL + WEBUI_ADMIN_PASSWORD create the first admin on
+# startup (Open WebUI 0.9.5). Without those, the first visit is still the
+# browser "create admin" page. Re-running does not discard an existing admin
+# or chat history; delete webui.db yourself to reset.
 #
 # Branding (company icon/logo overlay) runs after pip so the static assets it
 # overwrites already exist; it is best-effort and never fails the step.
@@ -22,12 +23,17 @@ load_config
 
 log_step "Step 3/5: Open WebUI deployment"
 
-# Pre-flight file checks
-[ -f "$OPENWEBUI_FRESH_DB" ] || die "Missing clean DB: $OPENWEBUI_FRESH_DB"
+OPENWEBUI_DIR="/sandbox/open-webui"
+
 [ -f "$OPENWEBUI_START_SH" ] || die "Missing start.sh"
 [ -f "$OPENWEBUI_INSTALL_SH" ] || die "Missing install.sh"
 [ -f "$OPENWEBUI_FILTER_SRC" ] || die "Missing filter source: $OPENWEBUI_FILTER_SRC"
 [ -f "$OPENWEBUI_FILTER_INSTALLER" ] || die "Missing filter installer: $OPENWEBUI_FILTER_INSTALLER"
+
+HEADLESS=0
+if [ -n "${WEBUI_ADMIN_EMAIL:-}" ] && [ -n "${WEBUI_ADMIN_PASSWORD:-}" ]; then
+  HEADLESS=1
+fi
 
 wait_sandbox_ready || exit 1
 
@@ -59,10 +65,25 @@ print('200')
   return 1
 }
 
+webui_sql_count() {
+  local sql="$1"
+  sandbox_exec "python3 -c \"
+import os, sqlite3
+p = '${OPENWEBUI_DIR}/data/webui.db'
+if not os.path.isfile(p):
+    print(0)
+    raise SystemExit
+c = sqlite3.connect('file:' + p + '?mode=ro', uri=True)
+try:
+    print(c.execute(\\\"${sql}\\\").fetchone()[0])
+except Exception:
+    print(0)
+\"" 2>/dev/null | tr -d '[:space:]' || echo 0
+}
+
 # ---- 1. Upload Open WebUI files to the sandbox ----
 # Sandbox cannot see host files; upload with nemoclaw first.
 log_info "Uploading Open WebUI files to the sandbox..."
-OPENWEBUI_DIR="/sandbox/open-webui"
 
 for f in "$OPENWEBUI_START_SH" "$OPENWEBUI_INSTALL_SH" "$OPENWEBUI_PDF_TOOL" \
          "$OPENWEBUI_FILTER_SRC" "$OPENWEBUI_FILTER_INSTALLER" \
@@ -133,21 +154,63 @@ if [ -f "${OPENWEBUI_BRAND_SH:-}" ]; then
     || log_warn "Branding overlay failed (UI will keep default Open WebUI assets)"
 fi
 
-# ---- 3. Place the clean DB ----
+# ---- 3. Place the clean DB only when no users exist ----
 # Upload into the directory (trailing slash). A dest named *.db is treated as a
 # folder by nemoclaw upload, so the file would land at *.db/*.db and cp fails.
-log_info "Placing clean database (first visit = create admin)..."
-sandbox_exec "rm -rf ${OPENWEBUI_DIR}/open-webui-fresh.db" \
-  || log_warn "Could not remove leftover ${OPENWEBUI_DIR}/open-webui-fresh.db"
-remote "nemoclaw ${SANDBOX_NAME} upload ${OPENWEBUI_FRESH_DB} ${OPENWEBUI_DIR}/" \
-  || die "Failed to upload clean DB"
-# sh -c keeps the whole && chain inside the sandbox (eval would split it and run
-# the tail commands on the host)
-# Drop leftover WAL/SHM first: otherwise SQLite can merge the blank file with
-# the previous admin row and step 3.5 thinks an admin exists before WebUI is up.
-sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/data && rm -f ${OPENWEBUI_DIR}/data/webui.db-wal ${OPENWEBUI_DIR}/data/webui.db-shm && cp ${OPENWEBUI_DIR}/open-webui-fresh.db ${OPENWEBUI_DIR}/data/webui.db && rm -f ${OPENWEBUI_DIR}/open-webui-fresh.db'" \
-  || die "Failed to place webui.db"
-log_ok "Clean DB in place"
+EXISTING_USERS="$(webui_sql_count "SELECT COUNT(*) FROM user")"
+case "${EXISTING_USERS}" in
+  ''|*[!0-9]*) EXISTING_USERS=0 ;;
+esac
+if [ "${EXISTING_USERS}" -ge 1 ]; then
+  log_ok "Keeping existing webui.db (${EXISTING_USERS} user(s))"
+elif [ -f "${OPENWEBUI_FRESH_DB:-}" ]; then
+  log_info "Placing clean database (no users yet)..."
+  sandbox_exec "rm -rf ${OPENWEBUI_DIR}/open-webui-fresh.db" \
+    || log_warn "Could not remove leftover ${OPENWEBUI_DIR}/open-webui-fresh.db"
+  remote "nemoclaw ${SANDBOX_NAME} upload ${OPENWEBUI_FRESH_DB} ${OPENWEBUI_DIR}/" \
+    || die "Failed to upload clean DB"
+  # Drop leftover WAL/SHM first: otherwise SQLite can merge the blank file with
+  # a previous admin row.
+  sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/data && rm -f ${OPENWEBUI_DIR}/data/webui.db-wal ${OPENWEBUI_DIR}/data/webui.db-shm && cp ${OPENWEBUI_DIR}/open-webui-fresh.db ${OPENWEBUI_DIR}/data/webui.db && rm -f ${OPENWEBUI_DIR}/open-webui-fresh.db'" \
+    || die "Failed to place webui.db"
+  log_ok "Clean DB in place"
+else
+  log_info "No fresh DB snapshot; Open WebUI will create the schema on first start"
+  sandbox_exec "mkdir -p ${OPENWEBUI_DIR}/data" \
+    || log_warn "Could not create ${OPENWEBUI_DIR}/data"
+fi
+
+# ---- 3b. Headless admin credentials for first boot ----
+EXISTING_ADMIN="$(webui_sql_count "SELECT COUNT(*) FROM user WHERE role='admin'")"
+case "${EXISTING_ADMIN}" in
+  ''|*[!0-9]*) EXISTING_ADMIN=0 ;;
+esac
+if [ "$HEADLESS" = "1" ] && [ "${EXISTING_ADMIN}" -lt 1 ]; then
+  log_info "Writing headless admin credentials for first Open WebUI start..."
+  ADMIN_TMP_DIR="$(mktemp -d)"
+  umask 077
+  TMP_ADMIN_ENV="${ADMIN_TMP_DIR}/.admin.env"
+  export TMP_ADMIN_ENV WEBUI_ADMIN_EMAIL WEBUI_ADMIN_PASSWORD
+  export WEBUI_ADMIN_NAME="${WEBUI_ADMIN_NAME:-Admin}"
+  python3 -c '
+import os, shlex
+from pathlib import Path
+lines = []
+for key in ("WEBUI_ADMIN_EMAIL", "WEBUI_ADMIN_PASSWORD", "WEBUI_ADMIN_NAME"):
+    value = os.environ.get(key, "")
+    if key == "WEBUI_ADMIN_NAME" and not value:
+        value = "Admin"
+    if value:
+        lines.append(f"{key}={shlex.quote(value)}")
+Path(os.environ["TMP_ADMIN_ENV"]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+'
+  chmod 600 "$TMP_ADMIN_ENV"
+  remote "nemoclaw ${SANDBOX_NAME} upload ${TMP_ADMIN_ENV} ${OPENWEBUI_DIR}/" \
+    || die "Failed to upload .admin.env"
+  sandbox_exec "chmod 600 ${OPENWEBUI_DIR}/.admin.env" \
+    || log_warn "chmod 600 .admin.env failed"
+  rm -rf "$ADMIN_TMP_DIR"
+fi
 
 # ---- 4. Place the filter source file ----
 log_info "Placing filter source file..."
@@ -155,18 +218,12 @@ sandbox_exec "sh -c 'mkdir -p ${OPENWEBUI_DIR}/functions && cp ${OPENWEBUI_DIR}/
   || log_warn "Failed to place filter source (can be placed manually later)"
 
 # ---- 5. Cleanup helper + start Open WebUI ----
-# Host path: five systemd user units. Container image bakes Open WebUI in the
-# Dockerfile and does not run this step.
 LIBEXEC_DIR="${LIBEXEC_DIR:-$HOME/.local/libexec}"
 mkdir -p "$LIBEXEC_DIR"
 BIND_ADDR="$(forward_bind_addr)"
-if in_container; then
-  log_info "Container mode: starting Open WebUI and forwards without systemd..."
-else
-  log_info "Creating systemd units (Open WebUI + forwards + Hermes + cleanup)..."
-  UNIT_DIR="${UNIT_DIR:-$HOME/.config/systemd/user}"
-  mkdir -p "$UNIT_DIR"
-fi
+log_info "Creating systemd units (Open WebUI + forwards + Hermes + cleanup)..."
+UNIT_DIR="${UNIT_DIR:-$HOME/.config/systemd/user}"
+mkdir -p "$UNIT_DIR"
 
 # ---- 5a. Cleanup helper ----
 # Unquoted heredoc: $(command -v openshell), ${SANDBOX_NAME} and ${WEBUI_PORT}
@@ -196,13 +253,16 @@ exit 1
 EOF
 chmod +x "$LIBEXEC_DIR/je-open-webui-cleanup"
 
-if in_container; then
-  sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \
-    || log_warn "chmod +x start.sh failed"
-  ensure_runtime_services
-  wait_webui_listen 90 \
-    || { log_err "Open WebUI did not start. Logs: /var/log/open-webui.log"; tail -n 40 /var/log/open-webui.log 2>/dev/null || true; exit 1; }
-else
+webui_already_up=0
+if sandbox_exec "python3 -c \"
+import os, urllib.request
+for k in ('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','ALL_PROXY','all_proxy'):
+    os.environ.pop(k, None)
+urllib.request.urlopen('http://127.0.0.1:${WEBUI_PORT:-3000}/static/loader.js', timeout=3)
+print('200')
+\"" 2>/dev/null | grep -q '200'; then
+  webui_already_up=1
+fi
 
 # ---- 5b. Open WebUI unit ----
 cat > "$UNIT_DIR/je-open-webui.service" <<EOF
@@ -268,84 +328,111 @@ fi
 
 # ---- 6. Enable and start ----
 # enable writes the default.target.wants symlink so the units come back after a
-# host reboot. The Open WebUI pair then needs an explicit restart rather than
-# enable --now, so a re-run actually picks up the blank database placed above;
-# the Hermes units carry no such state and use enable --now.
-log_info "Enabling and restarting Open WebUI..."
-# start.sh needs exec permission (uploaded files default to 644)
+# host reboot. Restart only when WebUI is down, or when a headless first boot
+# needs to pick up .admin.env; otherwise keep an existing admin session.
+log_info "Enabling Open WebUI..."
 sandbox_exec "chmod +x ${OPENWEBUI_DIR}/start.sh" \
   || log_warn "chmod +x start.sh failed"
-# Clear any failed state from earlier runs before starting
 systemctl --user reset-failed je-open-webui.service 2>/dev/null || true
 systemctl --user enable je-open-webui.service \
-  || log_warn "enable je-open-webui failed (continuing with restart)"
-systemctl --user restart je-open-webui.service \
-  || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
+  || log_warn "enable je-open-webui failed (continuing with start)"
+need_webui_restart=0
+if [ "$webui_already_up" != "1" ]; then
+  need_webui_restart=1
+elif [ "$HEADLESS" = "1" ] && [ "${EXISTING_ADMIN}" -lt 1 ]; then
+  need_webui_restart=1
+fi
+if [ "$need_webui_restart" = "1" ]; then
+  systemctl --user restart je-open-webui.service \
+    || { log_err "Start failed"; journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
+else
+  log_ok "Open WebUI already listening; not restarting"
+fi
 if [ -n "${WEBUI_LOCAL_PORT:-}" ]; then
   systemctl --user reset-failed je-open-webui-forward.service 2>/dev/null || true
   systemctl --user enable je-open-webui-forward.service \
     || log_warn "enable je-open-webui-forward failed (continuing with restart)"
-  systemctl --user restart je-open-webui-forward.service \
-    || log_warn "forward start failed (can retry later)"
+  if ! systemctl --user is-active --quiet je-open-webui-forward.service 2>/dev/null; then
+    systemctl --user restart je-open-webui-forward.service \
+      || log_warn "forward start failed (can retry later)"
+  fi
 fi
 wait_webui_listen 90 \
   || { journalctl --user -u je-open-webui.service -n 40 --no-pager; exit 1; }
 # The je-hermes-* units were enabled by install_hermes_host_forwards above.
 
-fi # in_container else (systemd path)
-
 # ---- 7. Wait for admin creation + import filter ----
 log_step "Step 3.5: Wait for admin creation and import filter"
 
 URL="http://127.0.0.1:${WEBUI_LOCAL_PORT:-3000}"
-WAIT_MIN=$((ADMIN_WAIT_SECS / 60))
-log_info "Open in your browser: ${URL}"
-log_info "First visit shows the 'create admin' page. The script continues automatically once created (up to ${WAIT_MIN} min)..."
-
-waited=0
-while [ "$waited" -lt "${ADMIN_WAIT_SECS}" ]; do
-  if sandbox_exec "python3 -c \"
-import sqlite3
-c = sqlite3.connect('file:${OPENWEBUI_DIR}/data/webui.db?mode=ro', uri=True)
-r = c.execute(\\\"SELECT COUNT(*) FROM user WHERE role='admin'\\\").fetchone()[0]
-print(r)
-\"" 2>/dev/null | grep -q "^[1-9]"; then
-    log_ok "Admin creation detected"
-    break
-  fi
-  sleep 5
-  waited=$((waited + 5))
-done
-
 FILTER_INSTALL_CMD="${OPENWEBUI_DIR}/.venv/bin/python ${OPENWEBUI_DIR}/install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py"
-if [ "$waited" -ge "${ADMIN_WAIT_SECS}" ]; then
-  log_warn "Timed out waiting, no admin detected. You can run the filter install manually later:"
-  log_warn "  After ./04-mcp.sh, run: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
+
+admin_present() {
+  local n
+  n="$(webui_sql_count "SELECT COUNT(*) FROM user WHERE role='admin'")"
+  case "$n" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$n" -ge 1 ]
+}
+
+if admin_present; then
+  log_ok "Admin already present"
 else
-  # Signup can race a restart; loopback is often still down at this exact moment.
-  wait_webui_listen 90 \
-    || { log_err "Open WebUI went away after admin creation; not importing filter"; exit 1; }
-  log_info "Importing filter (hermes_source_files v1.3.3)..."
-  # Must run under the Open WebUI venv python: the installer imports `jwt`,
-  # which is NOT in the sandbox system python3 (3.13), but IS in the venv
-  # (pyjwt is an open-webui dependency).
-  FILTER_OK=0
-  attempt=1
-  while [ "$attempt" -le 10 ]; do
-    if sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install-hermes-source-filter.py && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy ${OPENWEBUI_DIR}/.venv/bin/python install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py'"; then
-      FILTER_OK=1
+  if [ "$HEADLESS" = "1" ]; then
+    ADMIN_POLL_SECS=90
+    log_info "Headless admin: waiting for Open WebUI to create ${WEBUI_ADMIN_EMAIL} (max ${ADMIN_POLL_SECS}s)..."
+  else
+    ADMIN_POLL_SECS="${ADMIN_WAIT_SECS}"
+    WAIT_MIN=$((ADMIN_POLL_SECS / 60))
+    log_info "Open in your browser: ${URL}"
+    log_info "First visit shows the 'create admin' page. The script continues automatically once created (up to ${WAIT_MIN} min)..."
+  fi
+  waited=0
+  while [ "$waited" -lt "${ADMIN_POLL_SECS}" ]; do
+    if admin_present; then
+      log_ok "Admin creation detected"
       break
     fi
-    log_warn "filter import attempt ${attempt}/10 failed, retrying in 3s..."
-    sleep 3
-    attempt=$((attempt + 1))
+    sleep 5
+    waited=$((waited + 5))
   done
-  if [ "$FILTER_OK" = "1" ]; then
-    log_ok "filter imported (active + global)"
-  else
-    log_err "filter import failed after 10 attempts. Retry: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
-    exit 1
+  if [ "$waited" -ge "${ADMIN_POLL_SECS}" ] && ! admin_present; then
+    if [ "$HEADLESS" = "1" ]; then
+      log_err "Headless admin was not created within ${ADMIN_POLL_SECS}s"
+      exit 1
+    fi
+    log_warn "Timed out waiting, no admin detected. You can run the filter install manually later:"
+    log_warn "  After ./04-mcp.sh, run: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
+    log_ok "Step 3 done. Next: ./04-mcp.sh"
+    exit 0
   fi
+fi
+
+wait_webui_listen 90 \
+  || { log_err "Open WebUI went away after admin creation; not importing filter"; exit 1; }
+log_info "Importing filter (hermes_source_files v1.4.0)..."
+# Must run under the Open WebUI venv python: the installer imports `jwt`,
+# which is NOT in the sandbox system python3 (3.13), but IS in the venv
+# (pyjwt is an open-webui dependency).
+FILTER_OK=0
+attempt=1
+while [ "$attempt" -le 10 ]; do
+  if sandbox_exec "sh -c 'cd ${OPENWEBUI_DIR} && chmod +x install-hermes-source-filter.py && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy ${OPENWEBUI_DIR}/.venv/bin/python install-hermes-source-filter.py --source ${OPENWEBUI_DIR}/functions/hermes_source_files.py'"; then
+    FILTER_OK=1
+    break
+  fi
+  log_warn "filter import attempt ${attempt}/10 failed, retrying in 3s..."
+  sleep 3
+  attempt=$((attempt + 1))
+done
+if [ "$FILTER_OK" = "1" ]; then
+  log_ok "filter imported (active + global)"
+  sandbox_exec "rm -f ${OPENWEBUI_DIR}/.admin.env" \
+    || true
+else
+  log_err "filter import failed after 10 attempts. Retry: nemoclaw ${SANDBOX_NAME} exec -- ${FILTER_INSTALL_CMD}"
+  exit 1
 fi
 
 log_ok "Step 3 done. Next: ./04-mcp.sh"

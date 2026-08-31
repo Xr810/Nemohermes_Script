@@ -104,8 +104,8 @@ def main() -> int:
         "content": content,
         "meta": {
             "description": (
-                "Move direct chat uploads into one-request Hermes handoffs, remove their persistent WebUI "
-                "records, and leave knowledge collections persistent on RAG."
+                "Move direct chat uploads into one-request Hermes handoffs, register Hermes outgoing files "
+                "into Workspace Files, and leave knowledge collections persistent on RAG."
             )
         },
     }

@@ -3,11 +3,17 @@
 # Reads the Hermes API host/port/key from /sandbox/.hermes/.env and points Open
 # WebUI at it, then execs the server with a scrubbed environment (env -i), so
 # nothing the service manager exports can leak in. WEBUI_NAME sets the UI name.
+#
+# Optional /sandbox/open-webui/.admin.env (mode 600) supplies WEBUI_ADMIN_* for
+# headless first-boot account creation. Open WebUI ignores those variables once
+# any user exists. 03-openwebui.sh removes the file after the admin and filter
+# are in place.
 set -eu
 
 OPEN_WEBUI_ROOT=/sandbox/open-webui
 HERMES_ENV=/sandbox/.hermes/.env
 WEBUI_SECRET_FILE="$OPEN_WEBUI_ROOT/.webui_secret_key"
+ADMIN_ENV_FILE="$OPEN_WEBUI_ROOT/.admin.env"
 
 if [ ! -x "$OPEN_WEBUI_ROOT/.venv/bin/open-webui" ]; then
   echo 'Open WebUI is not installed. Run /sandbox/open-webui/install.sh first.' >&2
@@ -34,7 +40,17 @@ fi
 
 WEBUI_SECRET_KEY=$(cat "$WEBUI_SECRET_FILE")
 
-exec env -i \
+WEBUI_ADMIN_EMAIL=""
+WEBUI_ADMIN_PASSWORD=""
+WEBUI_ADMIN_NAME=""
+if [ -r "$ADMIN_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ADMIN_ENV_FILE"
+  set +a
+fi
+
+set -- env -i \
   HOME=/sandbox \
   USER=sandbox \
   PATH="$OPEN_WEBUI_ROOT/.venv/bin:/usr/local/bin:/usr/bin:/bin" \
@@ -61,5 +77,14 @@ exec env -i \
   TRANSFORMERS_OFFLINE=1 \
   OPENAI_API_BASE_URL="http://$API_SERVER_HOST:$API_SERVER_PORT/v1" \
   OPENAI_API_KEY="$API_SERVER_KEY" \
-  AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=15 \
+  AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=15
+
+if [ -n "${WEBUI_ADMIN_EMAIL:-}" ] && [ -n "${WEBUI_ADMIN_PASSWORD:-}" ]; then
+  set -- "$@" \
+    WEBUI_ADMIN_EMAIL="$WEBUI_ADMIN_EMAIL" \
+    WEBUI_ADMIN_PASSWORD="$WEBUI_ADMIN_PASSWORD" \
+    WEBUI_ADMIN_NAME="${WEBUI_ADMIN_NAME:-Admin}"
+fi
+
+exec "$@" \
   "$OPEN_WEBUI_ROOT/.venv/bin/open-webui" serve --host 127.0.0.1 --port 3000
